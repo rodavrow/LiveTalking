@@ -378,3 +378,49 @@ Behaviour:
 - `/interrupt_talk` does not clear a pending emotion.
 - If the set is missing or not yet loaded, the utterance plays `neutral`.
 - `GET /api/admin/sessions` reports `emotion_active` and `emotion_pending` per session (`null` without emotion support).
+
+---
+
+## 13. 流式音频 (/stream_audio)
+
+Stream one reply's audio while it is still being generated, instead of uploading a finished clip to `/humanaudio`. Speech starts after a 300 ms pre-buffer, not after the whole clip has arrived.
+
+```
+GET /stream_audio?sessionid=<id>&reply_id=<id>&emotion=<label>   (WebSocket)
+```
+
+| 参数 | 必填 | 类型 | 说明 |
+|------|------|------|------|
+| `sessionid` | 是 | string | 会话 ID |
+| `reply_id` | 是 | string | Chosen by the client, 1-64 chars of `A-Z a-z 0-9 _ . : -` |
+| `emotion` | 否 | string | Same as the `emotion` field on `/humanaudio`. Missing: the pending `/set_emotion` is used |
+
+**Refused before the upgrade** (HTTP status, JSON body `{"code": -1, "msg": ...}`):
+
+| Status | When |
+|--------|------|
+| 400 | `reply_id` missing or invalid |
+| 404 | session not found |
+| 409 | another streamed reply is open, or still playing, on this session |
+| 410 | this `reply_id` was cancelled by an interrupt |
+
+**Messages**
+
+| Direction | Message | Meaning |
+|-----------|---------|---------|
+| server → client | `{"type": "ready", "reply_id": "..."}` | Sent at once after the upgrade; start sending audio |
+| client → server | binary | Raw PCM, 16 kHz mono signed 16-bit little-endian. Any length; a sample may be split across messages |
+| client → server | `{"type": "end"}` | Reply complete. The server feeds the rest and closes with code 1000 |
+| server → client | `{"type": "cancelled"}` | The reply was interrupted. The server closes with code 4410 and drops anything sent after it |
+
+Behaviour:
+- The first 300 ms of audio are held before the avatar starts speaking, so a short delay between chunks does not cut speech. After that, audio is fed as it arrives; if the client falls behind real time, the avatar falls silent until more arrives.
+- If no message arrives for 5 s, or the socket closes without `{"type": "end"}`, the reply ends: what was received is played, and the session stays usable.
+- `/interrupt_talk` (and `/human` with `interrupt`) cancels the open reply as well as flushing audio. Its `reply_id` is then refused with 410 (the last 32 cancelled ids per session are remembered).
+- Every audio frame carries `reply_id` (and `emotion` when the avatar supports emotions), so the `start`/`end` events on SSE and the DataChannel name the reply.
+- Do not mix a streamed reply and a `/humanaudio` upload on the same session at the same time: their audio would interleave.
+- `POST /is_speaking` also returns `"reply_id"` next to `data`: the open or still-playing streamed reply, or `null`. It turns `null` when the reply's last frame has played, or on interrupt. If the last frame never plays (no viewer connected), it expires 10 s after the reply's audio would have finished, so a lost reply cannot block the session.
+
+```json
+{ "code": 0, "msg": "ok", "data": true, "reply_id": "r-42" }
+```

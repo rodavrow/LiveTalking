@@ -83,6 +83,7 @@ class BaseAvatar:
         self.custom_audio_index = {}
         self.custom_index = {}
         self.msgqueues = []
+        self.event_hooks = []  # callables(eventpoint), run by notify() as audio events play
         self.emotion = None  # EmotionController, set by attach_emotions()
         # self.custom_opt = {}
         self.__loadcustom()
@@ -232,6 +233,12 @@ class BaseAvatar:
         if eventpoint and eventpoint.get('status'):
             logger.info("notify:%s", eventpoint)
             self.send_msg(json.dumps(eventpoint))
+            for hook in self.event_hooks:
+                try:
+                    hook(eventpoint)
+                except Exception:
+                    # a broken hook must not stop the audio track that called notify()
+                    logger.exception('event hook failed for %s', eventpoint)
 
     def start_recording(self):
         if self.recording:
