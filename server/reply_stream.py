@@ -141,6 +141,7 @@ class ReplyState:
         self._open_id: Optional[str] = None     # socket open, frames still coming
         self._playing_id: Optional[str] = None  # all fed, waiting for 'end' to play
         self._playing_until = 0.0
+        self._played_while_open: Optional[str] = None
         self._on_cancel: Optional[Callable[[], None]] = None
         self._cancelled: deque[str] = deque(maxlen=cancelled_keep)
 
@@ -166,7 +167,9 @@ class ReplyState:
                 return
             self._open_id = None
             self._on_cancel = None
-            if fed_frames > 0:
+            already_played = self._played_while_open == reply_id
+            self._played_while_open = None
+            if fed_frames > 0 and not already_played:
                 self._playing_id = reply_id
                 self._playing_until = self._clock() + fed_frames * FRAME_S + PLAY_GRACE_S
 
@@ -181,8 +184,12 @@ class ReplyState:
         if eventpoint.get("status") != "end":
             return
         with self._lock:
-            if eventpoint.get("reply_id") == self._playing_id:
+            reply_id = eventpoint.get("reply_id")
+            if reply_id == self._playing_id:
                 self._playing_id = None
+            elif reply_id is not None and reply_id == self._open_id:
+                # 'end' played before finish_feeding ran; it must not start playing then
+                self._played_while_open = reply_id
 
     def cancel(self) -> Optional[str]:
         """Cancel the current reply (interrupt); returns its id, or None if there was none."""
@@ -191,6 +198,7 @@ class ReplyState:
             on_cancel = self._on_cancel
             self._open_id = None
             self._playing_id = None
+            self._played_while_open = None
             self._on_cancel = None
             if reply_id is not None:
                 self._cancelled.append(reply_id)

@@ -181,6 +181,13 @@ class ReplyStateTest(unittest.TestCase):
         state.on_event({"status": "end", "reply_id": "a"})
         self.assertEqual(state.current(), "a")
 
+    def test_regression_end_played_before_finish_feeding_clears_reply(self):
+        state = ReplyState()
+        state.try_open("a")
+        state.on_event({"status": "end", "reply_id": "a"})
+        state.finish_feeding("a", 50)
+        self.assertIsNone(state.current())
+
     def test_finish_feeding_with_nothing_fed_clears_at_once(self):
         state = ReplyState()
         state.try_open("a")

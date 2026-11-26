@@ -77,14 +77,30 @@ def _stream_refusal(status: int, msg: str):
     return web.json_response({"code": -1, "msg": msg}, status=status)
 
 
-async def _close_cancelled(ws):
-    if ws.closed:
-        return
-    try:
-        await ws.send_json({"type": "cancelled"})
-        await ws.close(code=4410, message=b"cancelled")
-    except (ConnectionResetError, RuntimeError):
-        pass  # client already gone; nothing left to tell it
+class _CancelCloser:
+    """Sends "cancelled" and closes with 4410 exactly once, from whichever side gets there first."""
+
+    def __init__(self, ws):
+        self.ws = ws
+        self.requested = False
+        self._task = None
+
+    def start(self):
+        if self._task is None:
+            self._task = asyncio.ensure_future(self._close())
+
+    async def wait(self):
+        self.start()
+        await self._task
+
+    async def _close(self):
+        if not self.ws.prepared or self.ws.closed:
+            return
+        try:
+            await self.ws.send_json({"type": "cancelled"})
+            await self.ws.close(code=4410, message=b"cancelled")
+        except (ConnectionResetError, RuntimeError):
+            pass  # client already gone; nothing left to tell it
 
 
 async def stream_audio(request):
@@ -97,17 +113,19 @@ async def stream_audio(request):
     if not valid_reply_id(reply_id):
         return _stream_refusal(400, "reply_id must be 1-64 chars of A-Z a-z 0-9 _ . : -")
 
-    state = reply_state_for(avatar_session)
     ws = web.WebSocketResponse()
-    loop = asyncio.get_running_loop()
+    if not ws.can_prepare(request).ok:
+        return _stream_refusal(400, "WebSocket upgrade required")
 
-    cancelled = threading.Event()
+    state = reply_state_for(avatar_session)
+    loop = asyncio.get_running_loop()
+    closer = _CancelCloser(ws)
 
     def on_cancel():
         # Closing the socket is what wakes the receive loop below. cancel() is plain sync
         # code that may run off the event loop, hence call_soon_threadsafe.
-        cancelled.set()
-        loop.call_soon_threadsafe(lambda: asyncio.ensure_future(_close_cancelled(ws)))
+        closer.requested = True
+        loop.call_soon_threadsafe(closer.start)
 
     opened = state.try_open(reply_id, on_cancel=on_cancel)
     if opened == "cancelled":
@@ -118,13 +136,14 @@ async def stream_audio(request):
     feeder = None
     ended = False
     try:
+        await ws.prepare(request)
         datainfo = {'reply_id': reply_id}
         if avatar_session.emotion is not None:
-            emotion = request.query.get('emotion')
-            datainfo['emotion'] = avatar_session.emotion.emotion_for_upload(emotion)
+            # after prepare, so a failed upgrade does not use up the pending emotion
+            datainfo['emotion'] = avatar_session.emotion.emotion_for_upload(
+                request.query.get('emotion'))
         feeder = ReplyFeeder(avatar_session.put_audio_frame, datainfo,
                              allowed=lambda: state.is_feeding(reply_id))
-        await ws.prepare(request)
         await ws.send_json({"type": "ready", "reply_id": reply_id})
         logger.info('stream_audio reply %s open on session %s', reply_id, sessionid)
 
@@ -146,13 +165,17 @@ async def stream_audio(request):
     except Exception:
         logger.exception('stream_audio reply %s failed', reply_id)
     finally:
-        # Stall, close or error without an end marker: play what was received.
-        if feeder is not None and state.is_feeding(reply_id):
-            feeder.end()
-        state.finish_feeding(reply_id, feeder.fed_frames if feeder is not None else 0)
-        if cancelled.is_set():
-            if ws.prepared:
-                await _close_cancelled(ws)
+        try:
+            # Stall, close or error without an end marker: play what was received.
+            if feeder is not None and state.is_feeding(reply_id):
+                feeder.end()
+        except Exception:
+            logger.exception('stream_audio reply %s: feeding the rest failed', reply_id)
+        finally:
+            # Always release the reply, or the session would refuse new ones with 409.
+            state.finish_feeding(reply_id, feeder.fed_frames if feeder is not None else 0)
+        if closer.requested:
+            await closer.wait()
         else:
             if not ended:
                 logger.info('stream_audio reply %s ended without end marker', reply_id)

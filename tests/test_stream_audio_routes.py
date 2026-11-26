@@ -214,6 +214,31 @@ class StreamAudioTests(AioHTTPTestCase):
         self.assertEqual(ws.close_code, 1000)
         self.assertEqual(session.statuses(), ["start", "end"])
 
+    async def test_regression_failing_feed_does_not_block_session(self):
+        session = self.use_session(StreamSession())
+
+        def broken(frame, eventpoint):
+            raise RuntimeError("queue gone")
+
+        session.put_audio_frame = broken
+        ws = await self.open("r1")
+        with self.assertLogs(level="ERROR"):
+            await ws.send_bytes(FRAME * 20)
+            await ws.receive(timeout=2)
+        self.assertIsNone((await self.speaking())["reply_id"])
+        del session.put_audio_frame
+        await self.finish(await self.open("r2"))
+
+    async def test_regression_plain_get_is_400_and_keeps_pending_emotion(self):
+        session = self.use_session(StreamSession())
+        await self.client.post("/set_emotion",
+                               data=json.dumps({"sessionid": "s1", "emotion": "happy"}))
+        resp = await self.client.get("/stream_audio",
+                                     params={"sessionid": "s1", "reply_id": "r1"})
+        self.assertEqual(resp.status, 400)
+        self.assertEqual(session.emotion.pending_name, "happy")
+        self.assertIsNone((await self.speaking())["reply_id"])
+
     async def test_text_other_than_end_is_ignored(self):
         session = self.use_session(StreamSession())
         ws = await self.open("r1")
