@@ -386,10 +386,10 @@ class BaseAvatar:
         
         _last_speaking = False
         crossfade = None
+        _last_output_frame = None
         if enable_transition:
             # 过渡时间 0.25s；每次状态切换都从切换前最后输出的帧开始淡入
             crossfade = CrossFade(0.25, lambda a, b, alpha: cv2.addWeighted(a, 1-alpha, b, alpha, 0))
-            _last_output_frame = None
 
         self.output.start()
         

@@ -1,3 +1,5 @@
+import unittest
+
 import numpy as np
 
 from utils.crossfade import CrossFade
@@ -19,40 +21,41 @@ def _make(clock: FakeClock) -> CrossFade:
     return CrossFade(0.25, _blend, clock=clock)
 
 
-def test_no_start_returns_target():
-    target = np.full((2, 2), 10.0)
-    assert _make(FakeClock()).apply(target) is target
+class CrossFadeTest(unittest.TestCase):
+    def test_no_start_returns_target(self):
+        target = np.full((2, 2), 10.0)
+        self.assertIs(_make(FakeClock()).apply(target), target)
+
+    def test_start_with_none_returns_target(self):
+        fade = _make(FakeClock())
+        fade.start(None)
+        target = np.full((2, 2), 10.0)
+        self.assertIs(fade.apply(target), target)
+
+    def test_midway_blends(self):
+        clock = FakeClock()
+        fade = _make(clock)
+        fade.start(np.zeros((2, 2)))
+        clock.now = 0.125
+        np.testing.assert_allclose(fade.apply(np.full((2, 2), 10.0)), np.full((2, 2), 5.0))
+
+    def test_after_duration_returns_target(self):
+        clock = FakeClock()
+        fade = _make(clock)
+        fade.start(np.zeros((2, 2)))
+        clock.now = 0.25
+        target = np.full((2, 2), 10.0)
+        self.assertIs(fade.apply(target), target)
+
+    def test_restart_replaces_source(self):
+        clock = FakeClock()
+        fade = _make(clock)
+        fade.start(np.zeros((2, 2)))
+        clock.now = 1.0
+        fade.start(np.full((2, 2), 4.0))
+        clock.now = 1.125
+        np.testing.assert_allclose(fade.apply(np.full((2, 2), 10.0)), np.full((2, 2), 7.0))
 
 
-def test_start_with_none_returns_target():
-    fade = _make(FakeClock())
-    fade.start(None)
-    target = np.full((2, 2), 10.0)
-    assert fade.apply(target) is target
-
-
-def test_midway_blends():
-    clock = FakeClock()
-    fade = _make(clock)
-    fade.start(np.zeros((2, 2)))
-    clock.now = 0.125
-    np.testing.assert_allclose(fade.apply(np.full((2, 2), 10.0)), np.full((2, 2), 5.0))
-
-
-def test_after_duration_returns_target():
-    clock = FakeClock()
-    fade = _make(clock)
-    fade.start(np.zeros((2, 2)))
-    clock.now = 0.25
-    target = np.full((2, 2), 10.0)
-    assert fade.apply(target) is target
-
-
-def test_restart_replaces_source():
-    clock = FakeClock()
-    fade = _make(clock)
-    fade.start(np.zeros((2, 2)))
-    clock.now = 1.0
-    fade.start(np.full((2, 2), 4.0))
-    clock.now = 1.125
-    np.testing.assert_allclose(fade.apply(np.full((2, 2), 10.0)), np.full((2, 2), 7.0))
+if __name__ == "__main__":
+    unittest.main()
