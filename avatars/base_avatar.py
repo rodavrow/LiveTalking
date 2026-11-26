@@ -381,12 +381,12 @@ class BaseAvatar:
         logger.info('baseavatar inference thread stop')
 
     def process_frames(self,quit_event):
-        enable_transition = False  # 设置为False禁用过渡效果，True启用
+        enable_transition = True  # dave: cross-fade listening <-> talking  # 设置为False禁用过渡效果，True启用
         
         _last_speaking = False
         _transition_start = time.time()
         if enable_transition:
-            _transition_duration = 0.1  # 过渡时间
+            _transition_duration = 0.25  # 过渡时间
             _last_silent_frame = None  # 静音帧缓存
             _last_speaking_frame = None  # 说话帧缓存
 
