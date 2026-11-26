@@ -48,6 +48,7 @@ from av import AudioFrame, VideoFrame
 from fractions import Fraction
 
 from utils.logger import logger
+from utils.audio_decode import decode_audio
 from utils.image import read_imgs,mirror_index
 from utils.crossfade import CrossFade
 from avatars.emotion import NEUTRAL, FrameSet
@@ -174,7 +175,7 @@ class BaseAvatar:
             idx += self.chunk
     
     def __create_bytes_stream(self, byte_stream):
-        stream, sample_rate = sf.read(byte_stream) # [T*sample_rate,] float64
+        stream, sample_rate = decode_audio(byte_stream) # MP3 via PyAV: sf.read can cut headerless MP3s short
         logger.info(f'[INFO]put audio stream {sample_rate}: {stream.shape}')
         stream = stream.astype(np.float32)
 
