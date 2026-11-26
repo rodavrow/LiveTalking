@@ -150,6 +150,7 @@ async def stream_audio(request):
             await ws.send_json({"type": "ready", "reply_id": reply_id})
             logger.info('stream_audio reply %s open on session %s', reply_id, sessionid)
 
+        last_audio_at = loop.time()
         while state.is_feeding(reply_id):
             try:
                 msg = await ws.receive(timeout=reply_stream.STALL_TIMEOUT_S)
@@ -157,11 +158,23 @@ async def stream_audio(request):
                 logger.warning('stream_audio reply %s stalled, ending it', reply_id)
                 break
             if msg.type == web.WSMsgType.BINARY:
+                last_audio_at = loop.time()
                 feeder.feed(msg.data)
             elif msg.type == web.WSMsgType.TEXT:
-                if _is_end_message(msg.data):
+                kind = _message_type(msg.data)
+                if kind == 'end':
                     ended = True
                     break
+                if kind == 'hold':
+                    if loop.time() - last_audio_at >= reply_stream.HOLD_CAP_S:
+                        logger.warning('stream_audio reply %s held %.0f s without audio, '
+                                       'ending it', reply_id, reply_stream.HOLD_CAP_S)
+                        break
+                    if not state.holding():
+                        logger.info('stream_audio reply %s holding', reply_id)
+                    feeder.hold()
+                    state.set_holding(reply_id)
+                    continue
                 logger.warning('stream_audio reply %s: ignored text message', reply_id)
             else:
                 break  # closed or errored without an end marker
@@ -177,6 +190,14 @@ async def stream_audio(request):
         finally:
             # Always release the reply, or the session would refuse new ones with 409.
             state.finish_feeding(reply_id, feeder.fed_frames if feeder is not None else 0)
+        if feeder is not None:
+            logger.info(
+                'stream_audio reply %s received %.2f s of audio in %d messages '
+                '(first chunk %s, playback started %s after open), fed %.2f s%s',
+                reply_id, feeder.received_bytes / reply_stream.FRAME_BYTES * reply_stream.FRAME_S,
+                feeder.messages, _fmt_s(feeder.first_chunk_s), _fmt_s(feeder.released_s),
+                feeder.fed_frames * reply_stream.FRAME_S,
+                ', stream starts with a WAV header' if feeder.wav_header else '')
         if closer.requested:
             await closer.wait()
         else:
@@ -189,12 +210,17 @@ async def stream_audio(request):
     return ws
 
 
-def _is_end_message(text: str) -> bool:
+def _fmt_s(seconds):
+    return 'never' if seconds is None else f'+{seconds:.3f} s'
+
+
+def _message_type(text: str):
+    """The "type" of a JSON text message, or None."""
     try:
         message = json.loads(text)
     except ValueError:
-        return False
-    return isinstance(message, dict) and message.get('type') == 'end'
+        return None
+    return message.get('type') if isinstance(message, dict) else None
 
 
 # ─── 路由处理函数 ──────────────────────────────────────────────────────────
@@ -356,9 +382,11 @@ async def is_speaking(request):
     if avatar_session is None:
         return json_error("session not found")
     # reply_id sits beside data so clients reading data as a bool keep working
+    state = reply_state_for(avatar_session)
     return web.json_response({"code": 0, "msg": "ok",
                               "data": avatar_session.is_speaking(),
-                              "reply_id": reply_state_for(avatar_session).current()})
+                              "reply_id": state.current(),
+                              "holding": state.holding()})
 
 async def sse_handler(request):
     """SSE 事件流，推送服务器状态更新到客户端"""

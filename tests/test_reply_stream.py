@@ -143,7 +143,119 @@ class ReplyFeederTest(unittest.TestCase):
         self.assertEqual(sink.frames, [])
 
 
+class ReplyFeederHoldTest(unittest.TestCase):
+    def test_hold_refills_prebuffer_before_feeding_again(self):
+        sink = FakeSink()
+        feeder = make_feeder(sink, prebuffer_frames=3)
+        feeder.feed(frame_bytes(1) * 5)  # released: 4 fed, 1 held back
+        feeder.hold()
+        feeder.feed(frame_bytes(1) * 2)
+        self.assertEqual(len(sink.frames), 4)
+        feeder.feed(frame_bytes(1) * 2)
+        self.assertEqual(len(sink.frames), 8)
+
+    def test_first_frame_after_hold_carries_resume(self):
+        sink = FakeSink()
+        feeder = make_feeder(sink, prebuffer_frames=0)
+        feeder.feed(frame_bytes(1) * 3)
+        feeder.hold()
+        feeder.feed(frame_bytes(1) * 2)
+        resumes = [i for i, (_, e) in enumerate(sink.frames) if e.get("resume")]
+        self.assertEqual(resumes, [2])
+
+    def test_hold_then_end_marks_resume_and_end(self):
+        sink = FakeSink()
+        feeder = make_feeder(sink, prebuffer_frames=0)
+        feeder.feed(frame_bytes(1) * 2)
+        feeder.hold()
+        feeder.end()
+        self.assertEqual(sink.frames[-1][1].get("status"), "end")
+        self.assertTrue(sink.frames[-1][1].get("resume"))
+
+    def test_hold_before_any_audio_keeps_start_on_first_frame(self):
+        sink = FakeSink()
+        feeder = make_feeder(sink, prebuffer_frames=0)
+        feeder.hold()
+        feeder.feed(frame_bytes(1) * 2)
+        self.assertEqual(sink.frames[0][1].get("status"), "start")
+        self.assertTrue(sink.frames[0][1].get("resume"))
+
+
+class ReplyFeederStatsTest(unittest.TestCase):
+    def test_counts_received_audio_and_start_times(self):
+        now = [10.0]
+        sink = FakeSink()
+        feeder = ReplyFeeder(sink, {}, prebuffer_frames=2, clock=lambda: now[0])
+        now[0] = 10.1
+        feeder.feed(frame_bytes(1) * 2 + b"\x00")
+        now[0] = 10.3
+        feeder.feed(frame_bytes(1))
+        self.assertEqual((feeder.messages, feeder.received_bytes), (2, 3 * 640 + 1))
+        self.assertAlmostEqual(feeder.first_chunk_s, 0.1)
+        self.assertAlmostEqual(feeder.released_s, 0.3)
+
+    def test_short_reply_records_release_at_end(self):
+        feeder = make_feeder(FakeSink(), prebuffer_frames=10)
+        feeder.feed(frame_bytes(1))
+        self.assertIsNone(feeder.released_s)
+        feeder.end()
+        self.assertIsNotNone(feeder.released_s)
+
+    def test_flags_a_wav_header(self):
+        feeder = make_feeder(FakeSink())
+        feeder.feed(b"RIFF" + b"\x00" * 40)
+        self.assertTrue(feeder.wav_header)
+
+    def test_raw_pcm_is_not_flagged(self):
+        feeder = make_feeder(FakeSink())
+        feeder.feed(frame_bytes(1))
+        self.assertFalse(feeder.wav_header)
+
+
 class ReplyStateTest(unittest.TestCase):
+    def test_holding_until_resume_frame_is_sent(self):
+        state = ReplyState()
+        state.try_open("a")
+        state.set_holding("a")
+        self.assertTrue(state.holding())
+        state.on_event({"reply_id": "a"})
+        self.assertTrue(state.holding())
+        state.on_event({"reply_id": "a", "resume": True})
+        self.assertFalse(state.holding())
+
+    def test_resume_of_other_reply_keeps_holding(self):
+        state = ReplyState()
+        state.try_open("a")
+        state.set_holding("a")
+        state.on_event({"reply_id": "x", "resume": True})
+        self.assertTrue(state.holding())
+
+    def test_holding_cleared_by_cancel_and_by_finish(self):
+        state = ReplyState()
+        state.try_open("a")
+        state.set_holding("a")
+        state.cancel()
+        self.assertFalse(state.holding())
+        state.try_open("b")
+        state.set_holding("b")
+        state.finish_feeding("b", 10)
+        self.assertFalse(state.holding())
+
+    def test_set_holding_for_reply_not_open_is_ignored(self):
+        state = ReplyState()
+        state.set_holding("a")
+        self.assertFalse(state.holding())
+
+    def test_logs_seconds_sent_per_reply(self):
+        state = ReplyState()
+        state.try_open("a")
+        with self.assertLogs(level="INFO") as logs:
+            state.on_event({"status": "start", "reply_id": "a"})
+            for _ in range(48):
+                state.on_event({"reply_id": "a"})
+            state.on_event({"status": "end", "reply_id": "a"})
+        self.assertIn("reply a sent 1.00 s of audio", "\n".join(logs.output))
+
     def test_open_sets_current(self):
         state = ReplyState()
         self.assertEqual(state.try_open("a"), "ok")

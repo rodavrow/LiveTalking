@@ -231,9 +231,12 @@ class BaseAvatar:
             q.put(msg)
 
     def notify(self, eventpoint:dict):
-        if eventpoint and eventpoint.get('status'):
+        if not eventpoint:
+            return
+        if eventpoint.get('status'):
             logger.info("notify:%s", eventpoint)
             self.send_msg(json.dumps(eventpoint))
+        if eventpoint.get('status') or eventpoint.get('reply_id'):
             for hook in self.event_hooks:
                 try:
                     hook(eventpoint)

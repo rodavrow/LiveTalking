@@ -411,16 +411,18 @@ GET /stream_audio?sessionid=<id>&reply_id=<id>&emotion=<label>   (WebSocket)
 | server → client | `{"type": "ready", "reply_id": "..."}` | Sent at once after the upgrade; start sending audio |
 | client → server | binary | Raw PCM, 16 kHz mono signed 16-bit little-endian. Any length; a sample may be split across messages |
 | client → server | `{"type": "end"}` | Reply complete. The server feeds the rest and closes with code 1000 |
+| client → server | `{"type": "hold"}` | The reply has paused (e.g. a tool call) but is not over. Send it about 0.5 s after the last audio, then every 2 s |
 | server → client | `{"type": "cancelled"}` | The reply was interrupted. The server closes with code 4410 and drops anything sent after it |
 
 Behaviour:
 - The first 300 ms of audio are held before the avatar starts speaking, so a short delay between chunks does not cut speech. After that, audio is fed as it arrives; if the client falls behind real time, the avatar falls silent until more arrives.
 - If no message arrives for 5 s, or the socket closes without `{"type": "end"}`, the reply ends: what was received is played, and the session stays usable.
+- While `hold` messages keep coming, the reply stays open and the avatar shows its idle loop. Audio after the pause waits for the 300 ms pre-buffer again. After 90 s of holds with no audio the reply ends as on a stall.
 - `/interrupt_talk` (and `/human` with `interrupt`) cancels the open reply as well as flushing audio. Its `reply_id` is then refused with 410 (the last 32 cancelled ids per session are remembered).
 - Every audio frame carries `reply_id` (and `emotion` when the avatar supports emotions), so the `start`/`end` events on SSE and the DataChannel name the reply.
 - Do not mix a streamed reply and a `/humanaudio` upload on the same session at the same time: their audio would interleave.
-- `POST /is_speaking` also returns `"reply_id"` next to `data`: the open or still-playing streamed reply, or `null`. It turns `null` when the reply's last frame has played, or on interrupt. If the last frame never plays (no viewer connected), it expires 10 s after the reply's audio would have finished, so a lost reply cannot block the session.
+- `POST /is_speaking` also returns `"reply_id"` next to `data`: the open or still-playing streamed reply, or `null`. It turns `null` when the reply's last frame has played, or on interrupt. If the last frame never plays (no viewer connected), it expires 10 s after the reply's audio would have finished, so a lost reply cannot block the session. `"holding"` is `true` from a `hold` until the first frame after the pause has been sent, and is cleared by `end` and by interrupts.
 
 ```json
-{ "code": 0, "msg": "ok", "data": true, "reply_id": "r-42" }
+{ "code": 0, "msg": "ok", "data": true, "reply_id": "r-42", "holding": false }
 ```

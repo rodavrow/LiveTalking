@@ -26,6 +26,13 @@ class NotifyHookTest(unittest.TestCase):
         avatar.notify({"emotion": "happy"})
         self.assertEqual(seen, [])
 
+    def test_reply_frames_without_status_reach_hooks(self):
+        avatar = bare_avatar()
+        seen = []
+        avatar.event_hooks.append(seen.append)
+        avatar.notify({"reply_id": "r1", "emotion": "happy"})
+        self.assertEqual(seen, [{"reply_id": "r1", "emotion": "happy"}])
+
     def test_failing_hook_does_not_stop_later_hooks(self):
         avatar = bare_avatar()
         seen = []
