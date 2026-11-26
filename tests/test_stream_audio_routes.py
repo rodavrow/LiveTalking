@@ -39,7 +39,7 @@ class StreamSession(FakeSession):
     def play_out(self):
         """What the output track does as frames are sent: notify() runs the hooks."""
         for _, eventpoint in self.frames:
-            if eventpoint.get("status"):
+            if eventpoint.get("status") or eventpoint.get("reply_id"):  # as BaseAvatar.notify
                 for hook in self.event_hooks:
                     hook(eventpoint)
 
@@ -249,6 +249,52 @@ class StreamAudioTests(AioHTTPTestCase):
         self.assertEqual(resp.status, 400)
         self.assertEqual(session.emotion.pending_name, "happy")
         self.assertIsNone((await self.speaking())["reply_id"])
+
+    async def hold(self, ws):
+        await ws.send_str(json.dumps({"type": "hold"}))
+
+    async def test_hold_keeps_reply_open_past_stall_limit(self):
+        session = self.use_session(StreamSession())
+        with mock.patch.object(emotion_routes.routes.reply_stream, "STALL_TIMEOUT_S", 0.2):
+            ws = await self.open("r1")
+            await ws.send_bytes(FRAME * 20)
+            # real time is what the stall rule measures: 0.4 s of holds, twice the limit
+            for _ in range(4):
+                await self.hold(ws)
+                await asyncio.sleep(0.1)
+            body = await self.speaking()
+            self.assertEqual((body["reply_id"], body["holding"]), ("r1", True))
+            await ws.send_bytes(FRAME * 20)
+            await self.finish(ws)
+        self.assertEqual(session.statuses()[-1], "end")
+        self.assertEqual(len(session.frames), 40)
+
+    async def test_holding_clears_when_resumed_audio_is_sent(self):
+        session = self.use_session(StreamSession())
+        ws = await self.open("r1")
+        await ws.send_bytes(FRAME * 20)
+        await self.hold(ws)
+        await ws.send_bytes(FRAME * 20)
+        await self.speaking()  # round trip, so the server has fed it
+        self.assertTrue((await self.speaking())["holding"])
+        session.play_out()
+        self.assertFalse((await self.speaking())["holding"])
+        await self.finish(ws)
+
+    async def test_hold_cap_ends_reply(self):
+        session = self.use_session(StreamSession())
+        with mock.patch.object(emotion_routes.routes.reply_stream, "HOLD_CAP_S", 0.0):
+            ws = await self.open("r1")
+            await ws.send_bytes(FRAME * 3)
+            await self.hold(ws)
+            msg = await ws.receive(timeout=2)
+        self.assertEqual(msg.type, aiohttp.WSMsgType.CLOSE)
+        self.assertEqual(ws.close_code, 1000)
+        self.assertEqual(session.statuses()[-1], "end")
+
+    async def test_no_reply_reports_not_holding(self):
+        self.use_session(StreamSession())
+        self.assertIs((await self.speaking())["holding"], False)
 
     async def test_text_other_than_end_is_ignored(self):
         session = self.use_session(StreamSession())

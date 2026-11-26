@@ -20,6 +20,7 @@ FRAME_BYTES = FRAME_SAMPLES * 2     # s16le
 PREBUFFER_FRAMES = 15               # 300 ms held before the first frame is fed
 STALL_TIMEOUT_S = 5.0               # no message for this long ends the reply
 CANCELLED_KEEP = 32                 # cancelled reply ids remembered per session
+HOLD_CAP_S = 90.0                   # holds without audio for this long end the reply
 PLAY_GRACE_S = 10.0                 # a fed reply counts as playing this long past its length
 FRAME_S = FRAME_SAMPLES / SAMPLE_RATE
 
@@ -70,7 +71,8 @@ class ReplyFeeder:
     """Feeds one reply's frames to the avatar, after a pre-buffer.
 
     The newest frame is always held back so the last one fed can carry the 'end' event,
-    the same events put_audio_file emits for an uploaded clip.
+    the same events put_audio_file emits for an uploaded clip. After hold() (a pause in the
+    reply) the pre-buffer fills again, and the first frame fed after it carries 'resume'.
     """
 
     def __init__(self, sink: Sink, datainfo: dict,
@@ -86,6 +88,7 @@ class ReplyFeeder:
         self._framer = PcmFramer()
         self._pending: list[Frame] = []
         self._released = False
+        self._resume_pending = False
         self._fed_frames = 0
         self._ended = False
         self._clock = clock
@@ -118,6 +121,13 @@ class ReplyFeeder:
         self._send(self._pending[:-1], last_is_end=False)
         self._pending = self._pending[-1:]
 
+    def hold(self) -> None:
+        """The reply has paused: fill the pre-buffer again before feeding what follows."""
+        if self._ended:
+            return
+        self._released = False
+        self._resume_pending = True
+
     def end(self) -> None:
         """Feed everything left; the last frame carries 'end'. Safe to call twice."""
         if self._ended:
@@ -140,6 +150,9 @@ class ReplyFeeder:
                 eventpoint = {"status": "start"}
             if last_is_end and i == len(frames) - 1:
                 eventpoint = {"status": "end"}
+            if self._resume_pending:
+                eventpoint["resume"] = True
+                self._resume_pending = False
             eventpoint.update(self._datainfo)
             self._sink(frame, eventpoint)
             self._fed_frames += 1
@@ -162,6 +175,7 @@ class ReplyState:
         self._playing_id: Optional[str] = None  # all fed, waiting for 'end' to play
         self._playing_until = 0.0
         self._played_while_open: Optional[str] = None
+        self._holding_id: Optional[str] = None  # paused: open, waiting for audio to resume
         self._sent_id: Optional[str] = None     # reply whose frames are being sent
         self._sent_frames = 0
         self._first_sent_at = 0.0
@@ -179,6 +193,16 @@ class ReplyState:
             self._on_cancel = on_cancel
             return "ok"
 
+    def set_holding(self, reply_id: str) -> None:
+        with self._lock:
+            if self._open_id == reply_id:
+                self._holding_id = reply_id
+
+    def holding(self) -> bool:
+        """True from a hold until the first frame after the pause has been sent."""
+        with self._lock:
+            return self._holding_id is not None
+
     def is_feeding(self, reply_id: str) -> bool:
         with self._lock:
             return self._open_id == reply_id
@@ -190,6 +214,7 @@ class ReplyState:
                 return
             self._open_id = None
             self._on_cancel = None
+            self._holding_id = None
             already_played = self._played_while_open == reply_id
             self._played_while_open = None
             if fed_frames > 0 and not already_played:
@@ -207,6 +232,10 @@ class ReplyState:
         reply_id = eventpoint.get("reply_id")
         if reply_id is not None:
             self._count_sent(reply_id, eventpoint.get("status"))
+            if eventpoint.get("resume"):
+                with self._lock:
+                    if self._holding_id == reply_id:
+                        self._holding_id = None
         if eventpoint.get("status") != "end":
             return
         with self._lock:
@@ -239,6 +268,7 @@ class ReplyState:
             self._open_id = None
             self._playing_id = None
             self._played_while_open = None
+            self._holding_id = None
             self._on_cancel = None
             if reply_id is not None:
                 self._cancelled.append(reply_id)
