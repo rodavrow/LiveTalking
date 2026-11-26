@@ -1,0 +1,13 @@
+.git
+.github
+docs
+tests
+assets
+models
+data/avatars
+data/record
+**/__pycache__
+*.mp4
+*.pth
+*.pkl
+*.tar.gz

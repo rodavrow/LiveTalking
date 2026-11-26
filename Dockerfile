@@ -1,55 +1,53 @@
-# Copyright (c) 2020-2022, NVIDIA CORPORATION.  All rights reserved.
-#
-# NVIDIA CORPORATION and its licensors retain all intellectual property
-# and proprietary rights in and to this software, related documentation
-# and any modifications thereto.  Any use, reproduction, disclosure or
-# distribution of this software and related documentation without an express
-# license agreement from NVIDIA CORPORATION is strictly prohibited.
+# LiveTalking image, built from the cloned source only:
+# official NVIDIA CUDA base, standard PyPI and PyTorch indexes, no prebuilt images,
+# no Aliyun mirrors. Model weights and avatars are NOT baked in; they are mounted.
+FROM nvidia/cuda:12.8.1-cudnn-runtime-ubuntu24.04
 
-ARG BASE_IMAGE=nvcr.io/nvidia/cuda:11.6.1-cudnn8-devel-ubuntu20.04
-FROM $BASE_IMAGE
+ENV DEBIAN_FRONTEND=noninteractive \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PYTHONUNBUFFERED=1 \
+    PATH=/opt/venv/bin:$PATH \
+    NUMBA_CACHE_DIR=/tmp/numba_cache \
+    HOME=/tmp
 
-RUN apt-get update -yq --fix-missing \
- && DEBIAN_FRONTEND=noninteractive apt-get install -yq --no-install-recommends \
-    pkg-config \
-    wget \
-    cmake \
-    curl \
-    git \
-    vim
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        python3 python3-venv python3-dev build-essential pkg-config \
+        ffmpeg libglib2.0-0 libgl1 curl ca-certificates \
+    && rm -rf /var/lib/apt/lists/* \
+    && python3 -m venv /opt/venv
 
-#ENV PYTHONDONTWRITEBYTECODE=1
-#ENV PYTHONUNBUFFERED=1
+# PyTorch 2.9.1 / CUDA 12.8, as the LiveTalking README specifies.
+# torch >= 2.6 defaults torch.load(weights_only=True), which refuses code in .pth files.
+RUN pip install torch==2.9.1 torchvision==0.24.1 torchaudio==2.9.1 \
+        --index-url https://download.pytorch.org/whl/cu128
 
-# nvidia-container-runtime
-#ENV NVIDIA_VISIBLE_DEVICES all
-#ENV NVIDIA_DRIVER_CAPABILITIES compute,utility,graphics
+WORKDIR /app
+COPY requirements.txt /tmp/requirements.txt
+RUN sed -i 's/\r$//' /tmp/requirements.txt \
+    && pip install -r /tmp/requirements.txt picklescan
 
-RUN wget https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh
-RUN sh Miniconda3-latest-Linux-x86_64.sh -b -u -p ~/miniconda3
-RUN ~/miniconda3/bin/conda init
-RUN source ~/.bashrc
-RUN conda create -n nerfstream python=3.10
-RUN conda activate nerfstream
+# Cap x264 frame size (VBV) so mid-stream keyframes don't burst to ~350 KB and lose packets on Wi-Fi.
+RUN sed -i 's/"tune": "zerolatency",\?/"tune": "zerolatency", "x264-params": "vbv-maxrate=3000:vbv-bufsize=500",/' /opt/venv/lib/python3.12/site-packages/aiortc/codecs/h264.py \
+ && grep -q 'vbv-maxrate' /opt/venv/lib/python3.12/site-packages/aiortc/codecs/h264.py
 
-RUN pip config set global.index-url https://mirrors.aliyun.com/pypi/simple/
-# install depend
-RUN conda install pytorch==1.12.1 torchvision==0.13.1 cudatoolkit=11.3 -c pytorch
-Copy requirements.txt ./
-RUN pip install -r requirements.txt
+COPY . /app
+# Windows checkout has CRLF line endings; normalise text files that Linux tools read.
+RUN find /app -type f \( -name '*.py' -o -name '*.sh' -o -name '*.yaml' -o -name '*.json' \) \
+        -exec sed -i 's/\r$//' {} +
 
-# additional libraries
-# RUN pip install "git+https://github.com/facebookresearch/pytorch3d.git"
-# RUN pip install tensorflow-gpu==2.8.0
+# S3FD face detector (only used when generating avatars), from its original author.
+# The torch-hub file name embeds the first 10 hex chars of its SHA-256; the build fails if it doesn't match.
+RUN curl -fsSL -o /app/avatars/wav2lip/face_detection/detection/sfd/s3fd.pth \
+        https://www.adrianbulat.com/downloads/python-fan/s3fd-619a316812.pth \
+    && sha256sum /app/avatars/wav2lip/face_detection/detection/sfd/s3fd.pth | grep -q '^619a316812'
 
-# RUN pip uninstall protobuf
-# RUN pip install protobuf==3.20.1
+# Run as the TrueNAS "apps" user, not root.
+RUN mkdir -p /app/models /app/data/avatars /app/data/record \
+    && chown -R 568:568 /app
+USER 568:568
 
-# RUN conda install ffmpeg
-# Copy ../python_rtmpstream /python_rtmpstream
-# WORKDIR /python_rtmpstream/python
-# RUN pip install .
-
-Copy ../nerfstream /nerfstream
-WORKDIR /nerfstream
-CMD ["python3", "app.py"]
+EXPOSE 8010
+# --stun "" : LAN only, no public STUN server. --max_session 2 : avatar + a test browser.
+ENTRYPOINT ["python", "app.py", "--transport", "webrtc", "--model", "wav2lip", "--stun", "", "--max_session", "2"]
+CMD ["--avatar_id", "sylvia"]

@@ -192,6 +192,20 @@ Available images:
 - **AutoDL**: [Image](https://www.codewithgpu.com/i/lipku/livetalking/base)  
 - **UCloud**: [Image](https://www.compshare.cn/images/4458094e-a43d-45fe-9b57-de79253befe4?referral_code=3XW3852OBmnD089hMMrtuU&ytag=GPU_GitHub_livetalking) — Supports opening any port  
 
+### Build from source
+
+The root `Dockerfile` builds a CUDA 12.8 / PyTorch 2.9.1 image from this checkout. Model weights and avatars are not baked in; mount them at runtime.
+
+```bash
+git pull
+docker build -t livetalking .
+docker run --gpus all --network host \
+  -v "$PWD/models:/app/models" -v "$PWD/data/avatars:/app/data/avatars" \
+  livetalking --avatar_id <your_avatar_id>
+```
+
+The container runs as UID/GID 568, so the mounted directories must be readable by that user. WebRTC media uses UDP ports chosen at runtime, which is why the example uses host networking rather than publishing only port 8010.
+
 
 ---
 
