@@ -413,6 +413,8 @@ class BaseAvatar:
                 if cur_set.name != NEUTRAL: #回复结束，回到中性帧
                     index = 0
                     cur_set = neutral
+                    if self.emotion is not None:
+                        self.emotion.active_name = NEUTRAL
                 for i in range(self.batch_size):
                     idx = mirror_index(len(neutral), index)
                     self.res_frame_queue.put((None, audio_frames[i*2:i*2+2], idx, neutral))

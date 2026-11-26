@@ -229,6 +229,11 @@ class InferenceSelectionTestCase(unittest.TestCase):
         self.assertEqual([item[3] for item in items[BATCH:]], [avatar.neutral_set] * BATCH)
         self.assertEqual([item[2] for item in items[BATCH:]], [0, 1, 2, 3])
 
+    def test_revert_to_neutral_resets_active_name(self):
+        audio = video_frames(BATCH, lambda: speech("happy")) + video_frames(BATCH, silence)
+        avatar, _ = run_inference(audio, sets=self.sets)
+        self.assertEqual(avatar.emotion.active_name, NEUTRAL)
+
     def test_speech_pair_takes_emotion_of_its_first_speech_frame(self):
         audio = [silence(), speech("sad")] + video_frames(BATCH - 1, lambda: speech("sad"))
         _, items = run_inference(audio, sets=self.sets)
