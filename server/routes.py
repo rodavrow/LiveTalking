@@ -7,6 +7,7 @@ import asyncio
 import threading
 from aiohttp import web
 
+from avatars.emotion import resolve_label
 from utils.logger import logger
 
 
@@ -81,6 +82,12 @@ async def human(request):
         if params.get('tts'):  # tts 参数透传（voice, emotion 等）
             datainfo['tts'] = params.get('tts')
 
+        if params['type'] in ('echo', 'chat') and avatar_session.emotion is not None:
+            # after the type check, so a malformed request does not consume the pending emotion
+            emotion = params.get('emotion')
+            datainfo['emotion'] = avatar_session.emotion.emotion_for_upload(
+                str(emotion) if emotion is not None else None)
+
         if params['type'] == 'echo':
             avatar_session.put_msg_txt(params['text'], datainfo)
         elif params['type'] == 'chat':
@@ -124,6 +131,10 @@ async def humanaudio(request):
         avatar_session = get_session(request, sessionid)
         if avatar_session is None:
             return json_error("session not found")
+        if avatar_session.emotion is not None:
+            emotion = form.get('emotion')
+            datainfo['emotion'] = avatar_session.emotion.emotion_for_upload(
+                str(emotion) if emotion is not None else None)
         # 解码/重采样耗时与音频时长相关，放到默认线程池执行，避免阻塞事件循环；
         # 同一会话串行、跨会话并行
         loop = asyncio.get_event_loop()
@@ -131,6 +142,42 @@ async def humanaudio(request):
         return json_ok()
     except Exception as e:
         logger.exception('humanaudio exception:')
+        return json_error(str(e))
+
+
+async def set_emotion(request):
+    """Set the pending emotion for one session or every session of an avatar"""
+    try:
+        try:
+            params = await request.json()
+        except ValueError:
+            return json_error("invalid json")
+        if not isinstance(params, dict):
+            return json_error("invalid json")
+        sessionid = params.get('sessionid')
+        avatar_id = params.get('avatar_id')
+        if not sessionid and not avatar_id:
+            return json_error("sessionid or avatar_id required")
+        if sessionid:
+            session = get_session(request, str(sessionid))
+            if session is None:
+                return json_error("session not found")
+            targets = [session]
+        else:
+            targets = [s for s in list(session_manager.sessions.values())
+                       if s is not None
+                       and getattr(getattr(s, 'opt', None), 'avatar_id', None) == avatar_id]
+        emotion = params.get('emotion')
+        resolved = resolve_label(str(emotion) if emotion is not None else None,
+                                 request.app['opt'].emotion_labels_parsed)
+        count = 0
+        for session in targets:
+            if session.emotion is not None:
+                session.emotion.set_pending(resolved)
+                count += 1
+        return json_ok({"emotion": resolved, "sessions": count})
+    except Exception as e:
+        logger.exception('set_emotion exception:')
         return json_error(str(e))
 
 
@@ -239,6 +286,9 @@ async def admin_sessions(request):
                     "speaking": avatar_session.is_speaking() if hasattr(avatar_session, 'is_speaking') else False,
                     "recording": getattr(avatar_session, 'recording', False),
                 }
+                controller = getattr(avatar_session, 'emotion', None)
+                s_data["emotion_active"] = controller.active_name if controller else None
+                s_data["emotion_pending"] = controller.pending_name if controller else None
                 if s_opt:
                     s_data.update({
                         "model": getattr(s_opt, "model", ""),
@@ -273,6 +323,7 @@ def setup_routes(app):
     app.router.add_get("/", index)
     app.router.add_post("/human", human)
     app.router.add_post("/humanaudio", humanaudio)
+    app.router.add_post("/set_emotion", set_emotion)
     app.router.add_post("/set_audiotype", set_audiotype)
     app.router.add_post("/record", record)
     app.router.add_post("/interrupt_talk", interrupt_talk)

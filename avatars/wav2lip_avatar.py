@@ -38,6 +38,7 @@ import asyncio
 from av import AudioFrame, VideoFrame
 from avatars.wav2lip.models import Wav2Lip
 from avatars.base_avatar import BaseAvatar
+from avatars.emotion import FrameSet
 
 from tqdm import tqdm
 from utils.logger import logger
@@ -69,7 +70,7 @@ def load_model(path):
     model = model.to(device)
     return model.eval()
 
-def load_avatar(avatar_id):
+def load_avatar(avatar_id, max_workers: int | None = None):
     avatar_path = f"./data/avatars/{avatar_id}"
     full_imgs_path = f"{avatar_path}/full_imgs" 
     face_imgs_path = f"{avatar_path}/face_imgs" 
@@ -80,10 +81,10 @@ def load_avatar(avatar_id):
     frame_list_cycle = None
     input_img_list = glob.glob(os.path.join(full_imgs_path, '*.[jpJP][pnPN]*[gG]'))
     input_img_list = sorted(input_img_list, key=lambda x: int(os.path.splitext(os.path.basename(x))[0]))
-    frame_list_cycle = read_imgs(input_img_list)
+    frame_list_cycle = read_imgs(input_img_list, max_workers)
     input_face_list = glob.glob(os.path.join(face_imgs_path, '*.[jpJP][pnPN]*[gG]'))
     input_face_list = sorted(input_face_list, key=lambda x: int(os.path.splitext(os.path.basename(x))[0]))
-    face_list_cycle = read_imgs(input_face_list)
+    face_list_cycle = read_imgs(input_face_list, max_workers)
 
     return frame_list_cycle,face_list_cycle,coord_list_cycle
 
@@ -116,11 +117,16 @@ class LipReal(BaseAvatar):
     def inference_batch(self, index, audiofeat_batch):
         # 这里的 index 是针对当前 avatar 的索引
         # 返回一个 batch 的推理结果，batch 大小由 self.batch_size 决定
-        length = len(self.face_list_cycle)
+        neutral = self.neutral_set
+        refs = [(neutral, mirror_index(len(neutral), index + i)) for i in range(self.batch_size)]
+        return self.infer_frames(refs, index, audiofeat_batch)
+
+    def infer_frames(self, refs: list[tuple[FrameSet, int]], start_index: int,
+                     audiofeat_batch) -> np.ndarray:
+        # 每帧的人脸裁剪取自该帧所属的帧集，一个 batch 可以跨越表情切换
         img_batch = []
-        for i in range(self.batch_size):
-            idx = mirror_index(length, index + i)
-            face = self.face_list_cycle[idx]
+        for frame_set, idx in refs:
+            face = frame_set.faces[idx]
             img_batch.append(face)
         img_batch, audiofeat_batch = np.asarray(img_batch), np.asarray(audiofeat_batch)
 
@@ -139,10 +145,12 @@ class LipReal(BaseAvatar):
         return pred
 
     def paste_back_frame(self,pred_frame,idx:int):
-        bbox = self.coord_list_cycle[idx]
-        combine_frame = self.frame_list_cycle[idx].copy()
+        return self.paste_frame(pred_frame, idx, self.neutral_set)
+
+    def paste_frame(self, pred_frame, idx: int, frame_set: FrameSet) -> np.ndarray:
+        bbox = frame_set.coords[idx]
+        combine_frame = frame_set.frames[idx].copy()
         y1, y2, x1, x2 = bbox
         res_frame = cv2.resize(pred_frame.astype(np.uint8),(x2-x1,y2-y1))
         combine_frame[y1:y2, x1:x2] = res_frame
         return combine_frame
-

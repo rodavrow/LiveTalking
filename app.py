@@ -42,6 +42,8 @@ import registry
 from server.routes import setup_routes
 from server.rtc_manager import RTCManager
 from server.session_manager import session_manager
+from avatars.emotion import (EmotionConfig, EmotionController, EmotionSetStore,
+                             choose_custom, read_avatar_config)
 
 import argparse
 import random
@@ -61,6 +63,8 @@ app = Flask(__name__)
 opt = None
 model = None
 global_avatars = {} # avatar_id: payload
+emotion_store = None  # EmotionSetStore, wav2lip with emotions enabled only
+_warned_emotion_avatars = set()  # avatar ids already warned about for non-wav2lip models
         
 
 #####webrtc###############################
@@ -92,16 +96,23 @@ def build_avatar_session(sessionid:str, params:dict)->BaseAvatar:
     if ref_audio: #请求参数配置了参考音频
         opt_this.REF_FILE = ref_audio
         opt_this.REF_TEXT = ref_text
-    custom_config=params.get('custom_config','') #动作编排配置
-    if not custom_config:  # dave: per-avatar default, data/avatars/<id>/custom_config.json
-        _cc = os.path.join('data', 'avatars', avatar_id or '', 'custom_config.json')
-        if avatar_id and os.path.isfile(_cc):
-            with open(_cc, 'r', encoding='utf-8') as _f:
-                custom_config = _f.read()
-    if custom_config:
-        opt_this.customopt = json.loads(custom_config)
+    labels = opt.emotion_labels_parsed
+    if avatar_id:
+        file_custom, emotion_cfg = read_avatar_config(os.path.join('data', 'avatars', avatar_id), labels)
+    else:
+        file_custom, emotion_cfg = None, EmotionConfig.empty()
+    opt_this.customopt = choose_custom(params.get('custom_config', ''), file_custom, opt_this.customopt, labels) #动作编排配置
+    if emotion_store is None and emotion_cfg.emotions and avatar_id not in _warned_emotion_avatars:
+        _warned_emotion_avatars.add(avatar_id)
+        logger.warning("avatar %s configures emotions but they need model wav2lip with "
+                       "emotion_enabled; ignoring", avatar_id)
 
     avatar_session = registry.create("avatar", opt.model, opt=opt_this, model=model, avatar=avatar_this)
+    if emotion_store is not None:
+        controller = EmotionController(avatar_session.neutral_set, emotion_cfg, emotion_store,
+                                       labels, opt.emotion_ttl_s)
+        avatar_session.attach_emotions(controller)
+        controller.preload()  # runs in the session manager's thread pool, not the event loop
     return avatar_session
 
 async def offer(request):
@@ -127,7 +138,7 @@ async def download_record(request):
 
 
 def main():
-    global rtc_manager, opt, model,load_avatar
+    global rtc_manager, opt, model, load_avatar, emotion_store
     # 解析命令行参数
     from config import parse_args
     opt = parse_args()
@@ -161,6 +172,9 @@ def main():
         model = load_model(opt)
         global_avatars[opt.avatar_id] = load_avatar(opt.avatar_id)
         warm_up(opt.batch_size,global_avatars[opt.avatar_id],160)
+
+    if opt.model == 'wav2lip' and opt.emotion_enabled:
+        emotion_store = EmotionSetStore(load_fn=load_avatar)
 
     # init rtc manager
     session_manager.set_max_session(opt.max_session)

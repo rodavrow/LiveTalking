@@ -19,6 +19,8 @@
 #
 
 import math
+from collections.abc import Sequence
+from functools import cached_property
 from numpy.typing import NDArray
 import torch
 import numpy as np
@@ -47,6 +49,8 @@ from fractions import Fraction
 
 from utils.logger import logger
 from utils.image import read_imgs,mirror_index
+from utils.crossfade import CrossFade
+from avatars.emotion import NEUTRAL, FrameSet
 
 # class State(Enum):
 #     INIT=0
@@ -79,6 +83,7 @@ class BaseAvatar:
         self.custom_audio_index = {}
         self.custom_index = {}
         self.msgqueues = []
+        self.emotion = None  # EmotionController, set by attach_emotions()
         # self.custom_opt = {}
         self.__loadcustom()
 
@@ -318,13 +323,65 @@ class BaseAvatar:
             self.custom_index[audiotype] = 0
 
     # ========================== 核心渲染及 Pipeline 桥接 ==========================
+    def attach_emotions(self, controller) -> None:
+        """Attach an EmotionController. wav2lip only: other models ignore per-frame sets."""
+        self.emotion = controller
+
+    @cached_property
+    def neutral_set(self) -> FrameSet:
+        return FrameSet(NEUTRAL, self.frame_list_cycle, getattr(self, 'face_list_cycle', None),
+                        self.coord_list_cycle)
+
     def get_avatar_length(self):
-        if hasattr(self, 'frame_list_cycle'):
-            return len(self.frame_list_cycle)
-        return 1
-        
+        if not hasattr(self, 'frame_list_cycle'):
+            return 1
+        if self.emotion is None:
+            return len(self.neutral_set)
+        return len(self.emotion.frame_set(self.emotion.active_name))
+
+    def infer_frames(self, refs: list[tuple[FrameSet, int]], start_index: int,
+                     audiofeat_batch) -> Sequence[np.ndarray]:
+        """Run one batch; refs[i] is the (set, idx) whose face crop frame i must use.
+
+        Models without emotion support ignore refs: with no controller every ref is the
+        neutral set at mirror_index(len, start_index + i), which inference_batch derives itself.
+        """
+        return self.inference_batch(start_index, audiofeat_batch)
+
+    def paste_frame(self, res_frame, idx: int, frame_set: FrameSet) -> np.ndarray:
+        return self.paste_back_frame(res_frame, idx)
+
+    def _speech_frame_set(self, audio_pair: list[AudioFrameData]) -> FrameSet:
+        tag = next(f.userdata.get('emotion') for f in audio_pair if f.type == 0)
+        if self.emotion is None:
+            return self.neutral_set
+        frame_set = self.emotion.frame_set(tag)
+        # active_name is a label (the admin API shows it and get_avatar_length resolves it);
+        # frame_set.name is the emotion avatar id, so it can't be stored here.
+        self.emotion.active_name = NEUTRAL if frame_set.name == NEUTRAL else tag
+        return frame_set
+
+    def _select_frame_sets(self, audio_frames: list[AudioFrameData], index: int,
+                           cur_set: FrameSet) -> tuple[list[tuple[FrameSet, int]], int, FrameSet]:
+        """Pick (set, idx) per video frame of a speech batch; returns refs, next index, set."""
+        refs = []
+        for i in range(self.batch_size):
+            audio_pair = audio_frames[i*2:i*2+2]
+            if audio_pair[0].type == 0 or audio_pair[1].type == 0:
+                frame_set = self._speech_frame_set(audio_pair)
+            else:
+                # 回复中的短暂停顿沿用当前表情，避免表情片段从第 0 帧重新开始
+                frame_set = cur_set
+            if frame_set.name != cur_set.name:
+                index = 0
+                cur_set = frame_set
+            refs.append((frame_set, mirror_index(len(frame_set), index)))
+            index = index + 1
+        return refs, index, cur_set
+
     def inference(self, quit_event):
-        length = self.get_avatar_length()
+        neutral = self.neutral_set
+        cur_set = neutral
         index = 0
         count = 0
         counttime = 0
@@ -354,16 +411,23 @@ class BaseAvatar:
             current_speaking = not is_all_silence
 
             if is_all_silence: #全为静音数据，只需要取fullimg，不需要推理
+                if cur_set.name != NEUTRAL: #回复结束，回到中性帧
+                    index = 0
+                    cur_set = neutral
+                    if self.emotion is not None:
+                        self.emotion.active_name = NEUTRAL
                 for i in range(self.batch_size):
-                    idx = mirror_index(length, index)
-                    self.res_frame_queue.put((None, audio_frames[i*2:i*2+2], idx))
+                    idx = mirror_index(len(neutral), index)
+                    self.res_frame_queue.put((None, audio_frames[i*2:i*2+2], idx, neutral))
                     index = index + 1
             else:
                 if current_speaking and not last_speaking and self.custom_index.get(1) is not None: #从静音到说话切换,并且有自定义静态视频
                     index = 0
+                start_index = index
+                refs, index, cur_set = self._select_frame_sets(audio_frames, index, cur_set)
                 t = time.perf_counter()
 
-                pred = self.inference_batch(index, audiofeat_batch)
+                pred = self.infer_frames(refs, start_index, audiofeat_batch)
 
                 counttime += (time.perf_counter() - t)
                 count += self.batch_size
@@ -372,8 +436,8 @@ class BaseAvatar:
                     count = 0
                     counttime = 0
                 for i, res_frame in enumerate(pred):
-                    self.res_frame_queue.put((res_frame, audio_frames[i*2:i*2+2], mirror_index(length, index)))
-                    index = index + 1
+                    frame_set, idx = refs[i]
+                    self.res_frame_queue.put((res_frame, audio_frames[i*2:i*2+2], idx, frame_set))
                     
             if current_speaking != last_speaking:
                 logger.info(f"inference 状态切换：{'说话' if last_speaking else '静音'} → {'说话' if current_speaking else '静音'}")
@@ -384,18 +448,20 @@ class BaseAvatar:
         enable_transition = True  # dave: cross-fade listening <-> talking  # 设置为False禁用过渡效果，True启用
         
         _last_speaking = False
-        _transition_start = time.time()
+        _last_talking_set_name = None
+        crossfade = None
+        _last_output_frame = None
         if enable_transition:
-            _transition_duration = 0.25  # 过渡时间
-            _last_silent_frame = None  # 静音帧缓存
-            _last_speaking_frame = None  # 说话帧缓存
+            # 过渡时间 0.25s；每次状态切换都从切换前最后输出的帧开始淡入
+            crossfade = CrossFade(0.25, lambda a, b, alpha: cv2.addWeighted(a, 1-alpha, b, alpha, 0))
 
         self.output.start()
         
         while not quit_event.is_set():
             try:
                 audio_frames: list[AudioFrameData]
-                res_frame,audio_frames,idx = self.res_frame_queue.get(block=True, timeout=1)
+                frame_set: FrameSet
+                res_frame,audio_frames,idx,frame_set = self.res_frame_queue.get(block=True, timeout=1)
             except queue.Empty:
                 continue
             
@@ -403,8 +469,15 @@ class BaseAvatar:
             current_speaking = not (audio_frames[0].type!=0 and audio_frames[1].type!=0)
             if current_speaking != _last_speaking:
                 logger.info(f"状态切换：{'说话' if _last_speaking else '静音'} → {'说话' if current_speaking else '静音'}")
-                _transition_start = time.time()
+                if crossfade is not None:
+                    crossfade.start(_last_output_frame)
+            elif current_speaking and frame_set.name != _last_talking_set_name:
+                # 说话中切换表情帧集，同样淡入，避免画面跳变
+                if crossfade is not None:
+                    crossfade.start(_last_output_frame)
             _last_speaking = current_speaking
+            if current_speaking:
+                _last_talking_set_name = frame_set.name
 
             if audio_frames[0].type!=0 and audio_frames[1].type!=0: #全为静音数据，只需要取fullimg
                 self.speaking = False
@@ -414,38 +487,21 @@ class BaseAvatar:
                     target_frame = self.custom_img_cycle[audiotype][mirindex]
                     self.custom_index[audiotype] += 1
                 else:
-                    target_frame = self.frame_list_cycle[idx]
+                    target_frame = frame_set.frames[idx]
                 
-                if enable_transition:
-                    # 说话→静音过渡
-                    if time.time() - _transition_start < _transition_duration and _last_speaking_frame is not None:
-                        alpha = min(1.0, (time.time() - _transition_start) / _transition_duration)
-                        combine_frame = cv2.addWeighted(_last_speaking_frame, 1-alpha, target_frame, alpha, 0)
-                    else:
-                        combine_frame = target_frame
-                    # 缓存静音帧
-                    _last_silent_frame = combine_frame.copy()
-                else:
-                    combine_frame = target_frame
+                combine_frame = crossfade.apply(target_frame) if crossfade is not None else target_frame
             else:
                 self.speaking = True
                 try:
-                    current_frame = self.paste_back_frame(res_frame,idx)
+                    current_frame = self.paste_frame(res_frame,idx,frame_set)
                 except Exception as e:
-                    logger.warning(f"paste_back_frame error: {e}")
+                    logger.warning(f"paste_frame error: {e}")
                     continue
-                if enable_transition:
-                    # 静音→说话过渡
-                    if time.time() - _transition_start < _transition_duration and _last_silent_frame is not None:
-                        alpha = min(1.0, (time.time() - _transition_start) / _transition_duration)
-                        combine_frame = cv2.addWeighted(_last_silent_frame, 1-alpha, current_frame, alpha, 0)
-                    else:
-                        combine_frame = current_frame
-                    # 缓存说话帧
-                    _last_speaking_frame = combine_frame.copy()
-                else:
-                    combine_frame = current_frame
+                combine_frame = crossfade.apply(current_frame) if crossfade is not None else current_frame
 
+            if crossfade is not None:
+                # 在 putText 水印之前缓存，作为下一次状态切换的淡入源
+                _last_output_frame = combine_frame.copy()
             cv2.putText(combine_frame, "LiveTalking", (10, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.3, (128,128,128), 1)
             
             # 使用统一输出接口推送视频帧

@@ -6,6 +6,9 @@ import argparse
 import json
 import os
 
+from avatars.emotion import parse_custom_config, parse_labels
+from utils.logger import logger
+
 try:
     import yaml
     _has_yaml = True
@@ -34,6 +37,27 @@ def _yaml_to_args(yaml_cfg):
         dest = k.replace('-', '_')
         result[dest] = v
     return result
+
+
+def parse_bool(value) -> bool:
+    """argparse type for on/off flags; anything unrecognised is an error, not False."""
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().lower()
+    if text in ("1", "true", "yes", "on"):
+        return True
+    if text in ("0", "false", "no", "off"):
+        return False
+    raise argparse.ArgumentTypeError(f"expected a boolean (true/false), got {value!r}")
+
+
+def validate_emotion_opts(opt) -> str | None:
+    """Return an error message for invalid emotion settings, else None."""
+    if not isinstance(opt.emotion_labels, str):
+        return f"emotion_labels must be a comma-separated string, got {opt.emotion_labels!r}"
+    if not opt.emotion_ttl_s > 0:
+        return f"emotion_ttl_s must be greater than 0, got {opt.emotion_ttl_s!r}"
+    return None
 
 
 def parse_args():
@@ -69,6 +93,13 @@ def parse_args():
     # ─── 自定义动作和多形象 ────────────────────────────────────────────
     parser.add_argument('--customvideo_config', type=str, default='',
                         help="custom action json")
+
+    # ─── 表情说话循环 ──────────────────────────────────────────────────
+    parser.add_argument('--emotion_enabled', type=parse_bool, default=True, help="per-emotion talking frame sets (wav2lip only)")
+    parser.add_argument('--emotion_labels', type=str, default='neutral,happy,sad,angry,sarcastic',
+                        help="comma-separated emotion labels; neutral is always added")
+    parser.add_argument('--emotion_ttl_s', type=float, default=30,
+                        help="seconds a /set_emotion stays pending before it expires")
 
     # ─── TTS ───────────────────────────────────────────────────────────
     parser.add_argument('--tts', type=str, default='edgetts',
@@ -118,9 +149,16 @@ def parse_args():
     opt = parser.parse_args()
 
     # ─── 后处理 ────────────────────────────────────────────────────────
+    emotion_error = validate_emotion_opts(opt)
+    if emotion_error:
+        parser.error(emotion_error)
+    opt.emotion_labels_parsed = parse_labels(opt.emotion_labels)
     opt.customopt = []
     if opt.customvideo_config:
         with open(opt.customvideo_config, 'r') as f:
-            opt.customopt = json.load(f)
+            opt.customopt, cfg = parse_custom_config(json.load(f), opt.emotion_labels_parsed)
+        if cfg.emotions:
+            logger.warning("emotions in --customvideo_config are ignored; "
+                           "put them in data/avatars/<id>/custom_config.json")
 
     return opt
