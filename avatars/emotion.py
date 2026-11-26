@@ -50,15 +50,35 @@ class EmotionConfig:
         return cls({}, True)
 
 
-def _parse_emotions(raw: dict, labels: tuple[str, ...]) -> dict[str, str]:
+# Sessions re-read the config on every build; warn about an ignored key once per process.
+_warned_keys: set[tuple[str, str]] = set()
+_warned_lock = threading.Lock()
+
+
+def _first_warning(source: str, key: str) -> bool:
+    with _warned_lock:
+        if (source, key) in _warned_keys:
+            return False
+        _warned_keys.add((source, key))
+        return True
+
+
+def _parse_emotions(raw: dict, labels: tuple[str, ...], source: str) -> dict[str, str]:
     emotions: dict[str, str] = {}
     for key, avatar_id in raw.items():
         label = str(key).strip().lower()
         if label == NEUTRAL:
             # neutral is always the avatar's own frames, so a mapping would be dead config
-            logger.warning("emotions: ignoring %r, neutral always uses the avatar itself", key)
+            if _first_warning(source, str(key)):
+                logger.warning(
+                    "emotions: ignoring %r in %s, neutral always uses the avatar itself",
+                    key, source,
+                )
         elif label not in labels:
-            logger.warning("emotions: ignoring %r, not in the configured labels", key)
+            if _first_warning(source, str(key)):
+                logger.warning(
+                    "emotions: ignoring %r in %s, not in the configured labels", key, source
+                )
         elif not isinstance(avatar_id, str) or not avatar_id:
             raise ValueError(f"emotions: avatar id for {key!r} must be a non-empty string")
         else:
@@ -67,9 +87,12 @@ def _parse_emotions(raw: dict, labels: tuple[str, ...]) -> dict[str, str]:
 
 
 def parse_custom_config(
-    raw: object, labels: tuple[str, ...]
+    raw: object, labels: tuple[str, ...], source: str = "custom config"
 ) -> tuple[list[dict], EmotionConfig]:
-    """Parse custom_config.json: the legacy list form or {custom, emotions, emotion_preload}."""
+    """Parse custom_config.json: the legacy list form or {custom, emotions, emotion_preload}.
+
+    source names the config in warnings and keys their once-per-process de-duplication.
+    """
     if isinstance(raw, list):
         return raw, EmotionConfig.empty()
     if not isinstance(raw, dict):
@@ -80,8 +103,10 @@ def parse_custom_config(
     emotions = raw.get("emotions", {})
     if not isinstance(emotions, dict):
         raise ValueError("custom config: 'emotions' must be an object")
-    preload = bool(raw.get("emotion_preload", True))
-    return custom, EmotionConfig(_parse_emotions(emotions, labels), preload)
+    preload = raw.get("emotion_preload", True)
+    if not isinstance(preload, bool):
+        raise ValueError(f"custom config: 'emotion_preload' must be true or false, got {preload!r}")
+    return custom, EmotionConfig(_parse_emotions(emotions, labels, source), preload)
 
 
 def read_avatar_config(
@@ -94,7 +119,7 @@ def read_avatar_config(
     try:
         with open(path, encoding="utf-8") as f:
             raw = json.load(f)
-        return parse_custom_config(raw, labels)
+        return parse_custom_config(raw, labels, path)
     except ValueError as exc:  # JSONDecodeError is a ValueError
         raise ValueError(f"invalid {path}: {exc}") from exc
 
@@ -107,7 +132,9 @@ def choose_custom(
 ) -> list[dict]:
     """Pick the custom-action list: request config, else the avatar's file, else the CLI one."""
     if request_raw:
-        custom, cfg = parse_custom_config(json.loads(request_raw), labels)
+        custom, cfg = parse_custom_config(
+            json.loads(request_raw), labels, "request custom_config"
+        )
         if cfg.emotions:
             # emotion sets are per avatar and preloaded at session start, not per request
             logger.warning("emotions in a request custom_config are ignored")
@@ -185,11 +212,17 @@ def _validate(candidate: FrameSet, reference: FrameSet) -> str | None:
         return "face crops present in only one of the sets"
     if candidate.faces is not None and len(candidate.faces) != len(candidate.frames):
         return f"{len(candidate.frames)} frames but {len(candidate.faces)} face crops"
-    if candidate.frames[0].shape != reference.frames[0].shape:
-        return f"frame shape {candidate.frames[0].shape} != {reference.frames[0].shape}"
+    for index, frame in enumerate(candidate.frames):
+        if frame is None:
+            return f"frame {index} is missing"
+        if frame.shape != reference.frames[0].shape:
+            return f"frame {index} shape {frame.shape} != {reference.frames[0].shape}"
     if candidate.faces is not None and reference.faces is not None:
-        if candidate.faces[0].shape != reference.faces[0].shape:
-            return f"face shape {candidate.faces[0].shape} != {reference.faces[0].shape}"
+        for index, face in enumerate(candidate.faces):
+            if face is None:
+                return f"face crop {index} is missing"
+            if face.shape != reference.faces[0].shape:
+                return f"face crop {index} shape {face.shape} != {reference.faces[0].shape}"
     return None
 
 
@@ -247,11 +280,15 @@ class EmotionSetStore:
 
     def _load(self, set_id: str, reference: FrameSet, max_workers: int | None) -> None:
         loaded: FrameSet | None = None
+        reason: str | None = None
         try:
             frames, faces, coords = self._load_fn(set_id, max_workers)
             candidate = FrameSet(set_id, frames, faces, coords)
             reason = _validate(candidate, reference)
             if reason is None:
+                # inside the guard: a malformed set must end up failed, never published
+                size_mb = candidate.nbytes / 1e6
+                height, width = candidate.frames[0].shape[:2]
                 loaded = candidate
         except Exception as exc:  # any loader failure must mark the set failed, not kill the thread
             reason = f"load failed: {exc!r}"
@@ -264,10 +301,9 @@ class EmotionSetStore:
         if loaded is None:
             logger.error("emotion set %s unusable: %s", set_id, reason)
             return
-        height, width = loaded.frames[0].shape[:2]
         logger.info(
             "emotion set %s: %d frames %dx%d, %.1f MB",
-            set_id, len(loaded), width, height, loaded.nbytes / 1e6,
+            set_id, len(loaded), width, height, size_mb,
         )
 
 
@@ -292,6 +328,7 @@ class EmotionController:
         self._store = store
         self._labels = labels
         self._pending = PendingEmotion(ttl_s, clock)
+        self._warned_incompatible: set[str] = set()
         # Written by the inference thread, read by the admin route.
         self.active_name: str = NEUTRAL
 
@@ -316,7 +353,7 @@ class EmotionController:
         if set_id is None:
             return NEUTRAL
         ready = self._store.get(set_id, self._neutral, lazy=not self._config.preload)
-        return label if ready is not None else NEUTRAL
+        return label if self._usable(set_id, ready) else NEUTRAL
 
     def frame_set(self, name: str | None) -> FrameSet:
         """Ready frame set for name, or the neutral set; never starts a load."""
@@ -326,8 +363,32 @@ class EmotionController:
         if set_id is None:
             return self._neutral
         ready = self._store.get(set_id, self._neutral, lazy=False)
+        return ready if self._usable(set_id, ready) else self._neutral
+
+    def _usable(self, set_id: str, ready: FrameSet | None) -> bool:
+        """True when ready can replace our neutral set.
+
+        The store is shared by sessions whose base avatars may differ in resolution, and it
+        validates a set only against the avatar that first loaded it.
+        """
         # FrameSet defines __len__, so test for None rather than truthiness.
-        return self._neutral if ready is None else ready
+        if ready is None:
+            return False
+        if self._same_geometry(ready):
+            return True
+        if set_id not in self._warned_incompatible:
+            self._warned_incompatible.add(set_id)
+            logger.warning(
+                "emotion set %s does not match this avatar's frame size, playing neutral", set_id
+            )
+        return False
+
+    def _same_geometry(self, ready: FrameSet) -> bool:
+        if ready.frames[0].shape != self._neutral.frames[0].shape:
+            return False
+        if ready.faces is not None and self._neutral.faces is not None:
+            return ready.faces[0].shape == self._neutral.faces[0].shape
+        return True
 
     def preload(self) -> None:
         if self._store is not None and self._config.preload:

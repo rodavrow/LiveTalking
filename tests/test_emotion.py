@@ -3,6 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from avatars import emotion as emotion_module
 from avatars.emotion import (
     NEUTRAL,
     EmotionConfig,
@@ -44,6 +45,26 @@ class LabelTests(unittest.TestCase):
 
 
 class ParseCustomConfigTests(unittest.TestCase):
+    def setUp(self):
+        emotion_module._warned_keys.clear()
+
+    def test_preload_must_be_a_real_bool(self):
+        for value in ("false", 0, 1, None, "true"):
+            with self.subTest(value=value), self.assertRaisesRegex(ValueError, "emotion_preload"):
+                parse_custom_config({"emotion_preload": value}, LABELS)
+
+    def test_preload_bool_accepted(self):
+        _, cfg = parse_custom_config({"emotion_preload": False}, LABELS)
+        self.assertIs(cfg.preload, False)
+
+    def test_ignored_key_warned_once_per_source(self):
+        raw = {"emotions": {"neutral": "x", "bogus": "y"}}
+        with self.assertLogs(logger, "WARNING") as logs:
+            for _ in range(3):
+                parse_custom_config(raw, LABELS, "a.json")
+            parse_custom_config(raw, LABELS, "b.json")
+        self.assertEqual(len(logs.records), 4)
+
     def test_plain_list_is_custom_only(self):
         custom = [{"audiotype": 1, "imgpath": "x", "audiopath": ""}]
         self.assertEqual(parse_custom_config(custom, LABELS), (custom, EmotionConfig({}, True)))

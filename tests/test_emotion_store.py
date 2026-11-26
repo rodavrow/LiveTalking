@@ -101,6 +101,36 @@ class EmotionSetStoreTest(unittest.TestCase):
                 self.assertIsNone(store.get("bad", REFERENCE, lazy=False))
                 self.assertEqual(store.status("bad"), "failed")
 
+    def test_bad_frame_or_face_in_middle_marked_failed_once(self):
+        def with_frame(index, value):
+            good = make_set(n=4)
+            frames = list(good.frames)
+            frames[index] = value
+            return FrameSet("x", frames, good.faces, good.coords)
+
+        def with_face(index, value):
+            good = make_set(n=4)
+            faces = list(good.faces)
+            faces[index] = value
+            return FrameSet("x", good.frames, faces, good.coords)
+
+        odd_face = np.zeros((64, 64, 3), np.uint8)
+        odd_frame = np.zeros((128, 128, 3), np.uint8)
+        cases = {
+            "none frame": with_frame(2, None),
+            "odd frame": with_frame(2, odd_frame),
+            "none face": with_face(1, None),
+            "odd face": with_face(2, odd_face),
+        }
+        for name, bad in cases.items():
+            with self.subTest(name):
+                store = EmotionSetStore(FakeLoader(bad), start_thread=lambda fn: fn())
+                with self.assertLogs(logger, level="ERROR") as logs:
+                    store.preload(["bad"], REFERENCE)
+                self.assertEqual(len(logs.records), 1)
+                self.assertEqual(store.status("bad"), "failed")
+                self.assertIsNone(store.get("bad", REFERENCE, lazy=False))
+
     def test_missing_set_marked_failed_once(self):
         loader = FakeLoader(error=FileNotFoundError("nope"))
         store = EmotionSetStore(loader, start_thread=lambda fn: fn())

@@ -6,6 +6,7 @@ from avatars.emotion import (
     EmotionController,
     EmotionSetStore,
 )
+from utils.logger import logger
 from test_emotion_store import Capture, FakeLoader, make_set
 
 LABELS = ("neutral", "happy", "sad", "angry")
@@ -114,6 +115,25 @@ class EmotionControllerTest(unittest.TestCase):
         c, store, _ = make_controller(preload=False, ready=False)
         c.preload()
         self.assertEqual(store.status("h"), "absent")
+
+    def test_set_from_other_resolution_is_neutral_and_warned_once(self):
+        other = make_set(frame_shape=(128, 128, 3), face_shape=(48, 48, 3))
+        c, store, _ = make_controller(store=EmotionSetStore(FakeLoader(other)), ready=False)
+        store.preload(["h"], other)
+        self.assertEqual(store.status("h"), "ready")
+        with self.assertLogs(logger, "WARNING") as logs:
+            self.assertEqual(c.emotion_for_upload("happy"), NEUTRAL)
+            self.assertIs(c.frame_set("happy"), NEUTRAL_SET)
+            self.assertIs(c.frame_set("happy"), NEUTRAL_SET)
+        self.assertEqual(len(logs.records), 1)
+        self.assertIn("h", logs.output[0])
+
+    def test_set_with_other_face_size_is_neutral(self):
+        other = make_set(face_shape=(48, 48, 3))
+        c, store, _ = make_controller(store=EmotionSetStore(FakeLoader(other)), ready=False)
+        store.preload(["h"], other)
+        with self.assertLogs(logger, "WARNING"):
+            self.assertIs(c.frame_set("happy"), NEUTRAL_SET)
 
     def test_active_name_defaults_to_neutral(self):
         c, _, _ = make_controller()
