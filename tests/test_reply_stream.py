@@ -143,7 +143,48 @@ class ReplyFeederTest(unittest.TestCase):
         self.assertEqual(sink.frames, [])
 
 
+class ReplyFeederStatsTest(unittest.TestCase):
+    def test_counts_received_audio_and_start_times(self):
+        now = [10.0]
+        sink = FakeSink()
+        feeder = ReplyFeeder(sink, {}, prebuffer_frames=2, clock=lambda: now[0])
+        now[0] = 10.1
+        feeder.feed(frame_bytes(1) * 2 + b"\x00")
+        now[0] = 10.3
+        feeder.feed(frame_bytes(1))
+        self.assertEqual((feeder.messages, feeder.received_bytes), (2, 3 * 640 + 1))
+        self.assertAlmostEqual(feeder.first_chunk_s, 0.1)
+        self.assertAlmostEqual(feeder.released_s, 0.3)
+
+    def test_short_reply_records_release_at_end(self):
+        feeder = make_feeder(FakeSink(), prebuffer_frames=10)
+        feeder.feed(frame_bytes(1))
+        self.assertIsNone(feeder.released_s)
+        feeder.end()
+        self.assertIsNotNone(feeder.released_s)
+
+    def test_flags_a_wav_header(self):
+        feeder = make_feeder(FakeSink())
+        feeder.feed(b"RIFF" + b"\x00" * 40)
+        self.assertTrue(feeder.wav_header)
+
+    def test_raw_pcm_is_not_flagged(self):
+        feeder = make_feeder(FakeSink())
+        feeder.feed(frame_bytes(1))
+        self.assertFalse(feeder.wav_header)
+
+
 class ReplyStateTest(unittest.TestCase):
+    def test_logs_seconds_sent_per_reply(self):
+        state = ReplyState()
+        state.try_open("a")
+        with self.assertLogs(level="INFO") as logs:
+            state.on_event({"status": "start", "reply_id": "a"})
+            for _ in range(48):
+                state.on_event({"reply_id": "a"})
+            state.on_event({"status": "end", "reply_id": "a"})
+        self.assertIn("reply a sent 1.00 s of audio", "\n".join(logs.output))
+
     def test_open_sets_current(self):
         state = ReplyState()
         self.assertEqual(state.try_open("a"), "ok")

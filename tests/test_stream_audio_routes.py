@@ -107,6 +107,16 @@ class StreamAudioTests(AioHTTPTestCase):
         self.assertEqual(session.frames[0][1]["reply_id"], "r1")
         self.assertEqual(session.frames[0][1]["emotion"], "happy")
 
+    async def test_logs_received_and_fed_seconds(self):
+        self.use_session(StreamSession())
+        ws = await self.open()
+        with self.assertLogs(level="INFO") as logs:
+            await ws.send_bytes(FRAME * 50)
+            await self.finish(ws)
+        line = next(l for l in logs.output if "received" in l)
+        self.assertIn("received 1.00 s of audio in 1 messages", line)
+        self.assertIn("fed 1.00 s", line)
+
     async def test_split_sample_is_reassembled(self):
         session = self.use_session(StreamSession())
         ws = await self.open()

@@ -177,6 +177,14 @@ async def stream_audio(request):
         finally:
             # Always release the reply, or the session would refuse new ones with 409.
             state.finish_feeding(reply_id, feeder.fed_frames if feeder is not None else 0)
+        if feeder is not None:
+            logger.info(
+                'stream_audio reply %s received %.2f s of audio in %d messages '
+                '(first chunk %s, playback started %s after open), fed %.2f s%s',
+                reply_id, feeder.received_bytes / reply_stream.FRAME_BYTES * reply_stream.FRAME_S,
+                feeder.messages, _fmt_s(feeder.first_chunk_s), _fmt_s(feeder.released_s),
+                feeder.fed_frames * reply_stream.FRAME_S,
+                ', stream starts with a WAV header' if feeder.wav_header else '')
         if closer.requested:
             await closer.wait()
         else:
@@ -187,6 +195,10 @@ async def stream_audio(request):
     if not ws.prepared:
         return _stream_refusal(500, "stream setup failed")
     return ws
+
+
+def _fmt_s(seconds):
+    return 'never' if seconds is None else f'+{seconds:.3f} s'
 
 
 def _is_end_message(text: str) -> bool:
