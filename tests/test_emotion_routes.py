@@ -1,4 +1,6 @@
 import importlib
+import io
+import warnings
 import json
 import sys
 import types
@@ -6,6 +8,7 @@ import unittest
 from types import SimpleNamespace
 from unittest import mock
 
+import aiohttp
 from aiohttp import web
 from aiohttp.test_utils import AioHTTPTestCase
 
@@ -86,7 +89,10 @@ class FakeSession:
 class RouteTestCase(AioHTTPTestCase):
     async def get_application(self):
         app = web.Application()
-        app["opt"] = SimpleNamespace(emotion_labels_parsed=LABELS)
+        with warnings.catch_warnings():
+            # production stores opt under a plain string key, and the routes read it that way
+            warnings.simplefilter("ignore", web.NotAppKeyWarning)
+            app["opt"] = SimpleNamespace(emotion_labels_parsed=LABELS)
         app.router.add_post("/set_emotion", routes.set_emotion)
         app.router.add_post("/humanaudio", routes.humanaudio)
         app.router.add_post("/human", routes.human)
@@ -105,9 +111,11 @@ class RouteTestCase(AioHTTPTestCase):
         return await resp.json()
 
     async def upload(self, sessionid, emotion=None):
-        form = {"sessionid": sessionid, "file": b"RIFF"}
+        form = aiohttp.FormData()
+        form.add_field("sessionid", sessionid)
+        form.add_field("file", io.BytesIO(b"RIFF"), filename="a.wav")
         if emotion is not None:
-            form["emotion"] = emotion
+            form.add_field("emotion", emotion)
         resp = await self.client.post("/humanaudio", data=form)
         return await resp.json()
 
@@ -192,6 +200,13 @@ class UploadTests(RouteTestCase):
         await self.post_json("/human", {"sessionid": "1", "type": "echo", "text": "hi",
                                         "emotion": "happy"})
         self.assertEqual(a.datainfos[0]["emotion"], "happy")
+
+    async def test_human_bad_type_keeps_pending(self):
+        a = FakeSession("x")
+        self.use_sessions({"1": a})
+        await self.post_json("/set_emotion", {"sessionid": "1", "emotion": "happy"})
+        await self.post_json("/human", {"sessionid": "1", "type": "bogus", "text": "hi"})
+        self.assertEqual(a.emotion.pending_name, "happy")
 
     async def test_human_interrupt_keeps_pending(self):
         a = FakeSession("x")

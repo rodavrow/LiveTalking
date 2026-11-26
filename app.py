@@ -101,7 +101,7 @@ def build_avatar_session(sessionid:str, params:dict)->BaseAvatar:
         file_custom, emotion_cfg = read_avatar_config(os.path.join('data', 'avatars', avatar_id), labels)
     else:
         file_custom, emotion_cfg = None, EmotionConfig.empty()
-    opt_this.customopt = choose_custom(params.get('custom_config', ''), file_custom, opt.customopt, labels) #动作编排配置
+    opt_this.customopt = choose_custom(params.get('custom_config', ''), file_custom, opt_this.customopt, labels) #动作编排配置
     if emotion_store is None and emotion_cfg.emotions and avatar_id not in _warned_emotion_avatars:
         _warned_emotion_avatars.add(avatar_id)
         logger.warning("avatar %s configures emotions but they need model wav2lip with "

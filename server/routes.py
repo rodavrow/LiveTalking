@@ -82,7 +82,8 @@ async def human(request):
         if params.get('tts'):  # tts 参数透传（voice, emotion 等）
             datainfo['tts'] = params.get('tts')
 
-        if avatar_session.emotion is not None:
+        if params['type'] in ('echo', 'chat') and avatar_session.emotion is not None:
+            # after the type check, so a malformed request does not consume the pending emotion
             emotion = params.get('emotion')
             datainfo['emotion'] = avatar_session.emotion.emotion_for_upload(
                 str(emotion) if emotion is not None else None)
