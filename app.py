@@ -93,6 +93,11 @@ def build_avatar_session(sessionid:str, params:dict)->BaseAvatar:
         opt_this.REF_FILE = ref_audio
         opt_this.REF_TEXT = ref_text
     custom_config=params.get('custom_config','') #动作编排配置
+    if not custom_config:  # dave: per-avatar default, data/avatars/<id>/custom_config.json
+        _cc = os.path.join('data', 'avatars', avatar_id or '', 'custom_config.json')
+        if avatar_id and os.path.isfile(_cc):
+            with open(_cc, 'r', encoding='utf-8') as _f:
+                custom_config = _f.read()
     if custom_config:
         opt_this.customopt = json.loads(custom_config)
 
