@@ -8,6 +8,8 @@ import threading
 from aiohttp import web
 
 from avatars.emotion import resolve_label
+from server import reply_stream
+from server.reply_stream import ReplyFeeder, reply_state_for, valid_reply_id
 from utils.logger import logger
 
 
@@ -63,6 +65,138 @@ def _put_audio_file_serialized(avatar_session, filebytes, datainfo):
         avatar_session.put_audio_file(filebytes, datainfo)
 
 
+def _interrupt(avatar_session):
+    """Stop talking: cancel any streamed reply first, so none of its frames follow the flush."""
+    cancelled = reply_state_for(avatar_session).cancel()
+    if cancelled is not None:
+        logger.info('stream_audio reply %s cancelled by interrupt', cancelled)
+    avatar_session.flush_talk()
+
+
+def _stream_refusal(status: int, msg: str):
+    return web.json_response({"code": -1, "msg": msg}, status=status)
+
+
+class _CancelCloser:
+    """Sends "cancelled" and closes with 4410 exactly once, from whichever side gets there first."""
+
+    def __init__(self, ws):
+        self.ws = ws
+        self.requested = False
+        self._task = None
+
+    def start(self):
+        # Before the upgrade has finished there is nothing to close yet; wait() sends it then.
+        if self._task is None and self.ws.prepared:
+            self._task = asyncio.ensure_future(self._close())
+
+    async def wait(self):
+        if self._task is None:
+            self._task = asyncio.ensure_future(self._close())
+        await self._task
+
+    async def _close(self):
+        if not self.ws.prepared or self.ws.closed:
+            return
+        try:
+            await self.ws.send_json({"type": "cancelled"})
+            await self.ws.close(code=4410, message=b"cancelled")
+        except (ConnectionResetError, RuntimeError):
+            pass  # client already gone; nothing left to tell it
+
+
+async def stream_audio(request):
+    """WebSocket: one streamed reply of 16 kHz mono s16le PCM, ended by {"type":"end"}."""
+    sessionid = request.query.get('sessionid', '')
+    reply_id = request.query.get('reply_id')
+    avatar_session = get_session(request, sessionid)
+    if avatar_session is None:
+        return _stream_refusal(404, "session not found")
+    if not valid_reply_id(reply_id):
+        return _stream_refusal(400, "reply_id must be 1-64 chars of A-Z a-z 0-9 _ . : -")
+
+    ws = web.WebSocketResponse()
+    if not ws.can_prepare(request).ok:
+        return _stream_refusal(400, "WebSocket upgrade required")
+
+    state = reply_state_for(avatar_session)
+    loop = asyncio.get_running_loop()
+    closer = _CancelCloser(ws)
+
+    def on_cancel():
+        # Closing the socket is what wakes the receive loop below. cancel() is plain sync
+        # code that may run off the event loop, hence call_soon_threadsafe.
+        closer.requested = True
+        loop.call_soon_threadsafe(closer.start)
+
+    opened = state.try_open(reply_id, on_cancel=on_cancel)
+    if opened == "cancelled":
+        return _stream_refusal(410, "reply cancelled")
+    if opened == "busy":
+        return _stream_refusal(409, "another reply is open on this session")
+
+    feeder = None
+    ended = False
+    try:
+        await ws.prepare(request)
+        datainfo = {'reply_id': reply_id}
+        if avatar_session.emotion is not None:
+            # after prepare, so a failed upgrade does not use up the pending emotion
+            datainfo['emotion'] = avatar_session.emotion.emotion_for_upload(
+                request.query.get('emotion'))
+        feeder = ReplyFeeder(avatar_session.put_audio_frame, datainfo,
+                             allowed=lambda: state.is_feeding(reply_id))
+        if not closer.requested:  # an interrupt during the upgrade gets "cancelled" instead
+            await ws.send_json({"type": "ready", "reply_id": reply_id})
+            logger.info('stream_audio reply %s open on session %s', reply_id, sessionid)
+
+        while state.is_feeding(reply_id):
+            try:
+                msg = await ws.receive(timeout=reply_stream.STALL_TIMEOUT_S)
+            except asyncio.TimeoutError:
+                logger.warning('stream_audio reply %s stalled, ending it', reply_id)
+                break
+            if msg.type == web.WSMsgType.BINARY:
+                feeder.feed(msg.data)
+            elif msg.type == web.WSMsgType.TEXT:
+                if _is_end_message(msg.data):
+                    ended = True
+                    break
+                logger.warning('stream_audio reply %s: ignored text message', reply_id)
+            else:
+                break  # closed or errored without an end marker
+    except Exception:
+        logger.exception('stream_audio reply %s failed', reply_id)
+    finally:
+        try:
+            # Stall, close or error without an end marker: play what was received.
+            if feeder is not None and state.is_feeding(reply_id):
+                feeder.end()
+        except Exception:
+            logger.exception('stream_audio reply %s: feeding the rest failed', reply_id)
+        finally:
+            # Always release the reply, or the session would refuse new ones with 409.
+            state.finish_feeding(reply_id, feeder.fed_frames if feeder is not None else 0)
+        if closer.requested:
+            await closer.wait()
+        else:
+            if not ended:
+                logger.info('stream_audio reply %s ended without end marker', reply_id)
+            if ws.prepared and not ws.closed:
+                await ws.close(code=1000)
+    if not ws.prepared:
+        return _stream_refusal(500, "stream setup failed")
+    return ws
+
+
+def _is_end_message(text: str) -> bool:
+    try:
+        message = json.loads(text)
+    except ValueError:
+        return False
+    return isinstance(message, dict) and message.get('type') == 'end'
+
+
 # ─── 路由处理函数 ──────────────────────────────────────────────────────────
 
 async def human(request):
@@ -76,7 +210,7 @@ async def human(request):
             return json_error("session not found")
 
         if params.get('interrupt'):
-            avatar_session.flush_talk()
+            _interrupt(avatar_session)
 
         datainfo = {}
         if params.get('tts'):  # tts 参数透传（voice, emotion 等）
@@ -111,7 +245,7 @@ async def interrupt_talk(request):
         avatar_session = get_session(request, sessionid)
         if avatar_session is None:
             return json_error("session not found")
-        avatar_session.flush_talk()
+        _interrupt(avatar_session)
         return json_ok()
     except Exception as e:
         logger.exception('interrupt_talk exception:')
@@ -221,7 +355,10 @@ async def is_speaking(request):
     avatar_session = get_session(request, sessionid)
     if avatar_session is None:
         return json_error("session not found")
-    return json_ok(data=avatar_session.is_speaking())
+    # reply_id sits beside data so clients reading data as a bool keep working
+    return web.json_response({"code": 0, "msg": "ok",
+                              "data": avatar_session.is_speaking(),
+                              "reply_id": reply_state_for(avatar_session).current()})
 
 async def sse_handler(request):
     """SSE 事件流，推送服务器状态更新到客户端"""
@@ -323,6 +460,7 @@ def setup_routes(app):
     app.router.add_get("/", index)
     app.router.add_post("/human", human)
     app.router.add_post("/humanaudio", humanaudio)
+    app.router.add_get("/stream_audio", stream_audio)
     app.router.add_post("/set_emotion", set_emotion)
     app.router.add_post("/set_audiotype", set_audiotype)
     app.router.add_post("/record", record)
