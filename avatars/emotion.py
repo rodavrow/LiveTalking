@@ -251,3 +251,66 @@ class EmotionSetStore:
             "emotion set %s: %d frames %dx%d, %.1f MB",
             set_id, len(loaded), width, height, loaded.nbytes / 1e6,
         )
+
+
+class EmotionController:
+    """Per-session emotion state: pending emotion, upload resolution, set lookup.
+
+    Pending emotions are consumed by uploads only; there is deliberately no way to
+    clear one, so /interrupt_talk leaves it in place.
+    """
+
+    def __init__(
+        self,
+        neutral: FrameSet,
+        config: EmotionConfig,
+        store: EmotionSetStore | None,
+        labels: tuple[str, ...],
+        ttl_s: float,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        self._neutral = neutral
+        self._config = config
+        self._store = store
+        self._labels = labels
+        self._pending = PendingEmotion(ttl_s, clock)
+        # Written by the inference thread, read by the admin route.
+        self.active_name: str = NEUTRAL
+
+    @property
+    def pending_name(self) -> str | None:
+        return self._pending.peek()
+
+    def set_pending(self, name: str | None) -> str:
+        label = resolve_label(name, self._labels)
+        self._pending.set(label)
+        return label
+
+    def emotion_for_upload(self, field: str | None) -> str:
+        """Label to tag an utterance with; neutral unless its set is ready right now."""
+        if self._store is None:
+            return NEUTRAL
+        # Always consume pending so a stale one cannot leak into a later upload.
+        pending = self._pending.take()
+        requested = field if field and field.strip() else pending
+        label = resolve_label(requested, self._labels)
+        set_id = self._config.emotions.get(label)
+        if set_id is None:
+            return NEUTRAL
+        ready = self._store.get(set_id, self._neutral, lazy=not self._config.preload)
+        return label if ready is not None else NEUTRAL
+
+    def frame_set(self, name: str | None) -> FrameSet:
+        """Ready frame set for name, or the neutral set; never starts a load."""
+        if self._store is None:
+            return self._neutral
+        set_id = self._config.emotions.get(resolve_label(name, self._labels))
+        if set_id is None:
+            return self._neutral
+        ready = self._store.get(set_id, self._neutral, lazy=False)
+        # FrameSet defines __len__, so test for None rather than truthiness.
+        return self._neutral if ready is None else ready
+
+    def preload(self) -> None:
+        if self._store is not None and self._config.preload:
+            self._store.preload(self._config.emotions.values(), self._neutral)
