@@ -6,6 +6,7 @@ from pathlib import Path
 from avatars.emotion import (
     NEUTRAL,
     EmotionConfig,
+    choose_custom,
     PendingEmotion,
     parse_custom_config,
     parse_labels,
@@ -123,6 +124,39 @@ class PendingEmotionTests(unittest.TestCase):
         self.assertEqual(self.pending.peek(), "happy")
         self.clock.now = 30.1
         self.assertIsNone(self.pending.peek())
+
+
+class ChooseCustomTests(unittest.TestCase):
+    FILE = [{"audiotype": 2}]
+    CLI = [{"audiotype": 3}]
+
+    def test_request_wins_over_file_and_cli(self):
+        result = choose_custom('[{"audiotype": 1}]', self.FILE, self.CLI, LABELS)
+        self.assertEqual(result, [{"audiotype": 1}])
+
+    def test_file_used_when_no_request(self):
+        self.assertEqual(choose_custom(None, self.FILE, self.CLI, LABELS), self.FILE)
+        self.assertEqual(choose_custom("", self.FILE, self.CLI, LABELS), self.FILE)
+
+    def test_empty_file_list_still_beats_cli(self):
+        self.assertEqual(choose_custom(None, [], self.CLI, LABELS), [])
+
+    def test_cli_used_last(self):
+        self.assertEqual(choose_custom(None, None, self.CLI, LABELS), self.CLI)
+
+    def test_request_emotions_warned_and_ignored(self):
+        raw = json.dumps({"custom": [{"audiotype": 1}], "emotions": {"happy": "x"}})
+        with self.assertLogs(logger, "WARNING"):
+            result = choose_custom(raw, None, self.CLI, LABELS)
+        self.assertEqual(result, [{"audiotype": 1}])
+
+    def test_request_without_emotions_does_not_warn(self):
+        with self.assertNoLogs(logger, "WARNING"):
+            choose_custom("[]", None, self.CLI, LABELS)
+
+    def test_bad_request_json_raises(self):
+        with self.assertRaises(ValueError):
+            choose_custom("{not json", None, self.CLI, LABELS)
 
 
 if __name__ == "__main__":

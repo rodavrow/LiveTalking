@@ -324,6 +324,7 @@ class BaseAvatar:
 
     # ========================== 核心渲染及 Pipeline 桥接 ==========================
     def attach_emotions(self, controller) -> None:
+        """Attach an EmotionController. wav2lip only: other models ignore per-frame sets."""
         self.emotion = controller
 
     @cached_property

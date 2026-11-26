@@ -99,6 +99,24 @@ def read_avatar_config(
         raise ValueError(f"invalid {path}: {exc}") from exc
 
 
+def choose_custom(
+    request_raw: str | None,
+    file_custom: list[dict] | None,
+    cli_custom: list[dict],
+    labels: tuple[str, ...],
+) -> list[dict]:
+    """Pick the custom-action list: request config, else the avatar's file, else the CLI one."""
+    if request_raw:
+        custom, cfg = parse_custom_config(json.loads(request_raw), labels)
+        if cfg.emotions:
+            # emotion sets are per avatar and preloaded at session start, not per request
+            logger.warning("emotions in a request custom_config are ignored")
+        return custom
+    if file_custom is not None:
+        return file_custom
+    return cli_custom
+
+
 class PendingEmotion:
     """One emotion waiting for the next utterance; stale after ttl_s seconds."""
 

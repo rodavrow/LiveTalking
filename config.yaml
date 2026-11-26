@@ -16,6 +16,11 @@ batch_size: 16
 # -------- Custom Actions ----------------------------------------------------------
 customvideo_config: ''
 
+# -------- Emotion talking loops ----------------------------------------------------------
+emotion_enabled: true          # per-emotion talking frame sets (wav2lip only)
+emotion_labels: 'neutral,happy,sad,angry,sarcastic'  # accepted emotion names; neutral is always added
+emotion_ttl_s: 30              # seconds a /set_emotion stays pending
+
 # -------- TTS ----------------------------------------------------------
 tts: edgetts                   # edgetts / gpt-sovits / cosyvoice / fishtts / tencent / doubao / indextts2 / azuretts / qwentts
 REF_FILE: ''                   # voice name or reference audio file path (wav, 16kHz, mono)
