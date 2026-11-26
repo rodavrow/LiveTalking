@@ -43,7 +43,7 @@ POST /offer
 }
 ```
 
-> 客户端如需接收字幕等服务器推送，可在创建 offer 前自建 DataChannel，详见 [12. DataChannel 事件推送（字幕）](#12-datachannel-事件推送字幕)。
+> 客户端如需接收字幕等服务器推送，可在创建 offer 前自建 DataChannel，详见 [11. DataChannel 事件推送（字幕）](#11-datachannel-事件推送字幕)。
 
 ---
 
@@ -122,7 +122,7 @@ POST /human
 | `type` | 是 | string | — | `echo`: 直接复读; `chat`: 触发 LLM 回答 |
 | `interrupt` | 否 | bool | false | 是否打断当前播报 |
 | `tts` | 否 | object | — | 透传给 TTS 的配置（如 `voice`, `emotion`） |
-| `emotion` | 否 | string | — | 本次播报的表情，见 [第 10 节](#10-设置表情-set_emotion)；缺省时使用待生效的 `/set_emotion` |
+| `emotion` | 否 | string | — | 本次播报的表情，见 [第 12 节](#12-设置表情-set_emotion)；缺省时使用待生效的 `/set_emotion` |
 
 **响应**:
 
@@ -146,7 +146,7 @@ POST /humanaudio
 |------|------|------|------|
 | `sessionid` | 是 | string | 会话 ID |
 | `file` | 是 | file | 音频文件 |
-| `emotion` | 否 | string | 本次播报的表情，见 [第 10 节](#10-设置表情-set_emotion)；缺省时使用待生效的 `/set_emotion` |
+| `emotion` | 否 | string | 本次播报的表情，见 [第 12 节](#12-设置表情-set_emotion)；缺省时使用待生效的 `/set_emotion` |
 
 **响应**:
 
@@ -252,42 +252,7 @@ POST /set_audiotype
 
 ---
 
-## 10. 设置表情 (/set_emotion)
-
-Choose the talking loop used for the next utterance (wav2lip avatars with `emotions` in their `custom_config.json`; see README-EN.md "Emotion talking loops").
-
-```
-POST /set_emotion
-```
-
-**Content-Type**: `application/json`
-
-| 参数 | 必填 | 类型 | 说明 |
-|------|------|------|------|
-| `sessionid` | 二选一 | string | Target one session. Wins when both are given |
-| `avatar_id` | 二选一 | string | Target every session running this avatar |
-| `emotion` | 否 | string | Name from `emotion_labels` (case-insensitive). Unknown or missing names resolve to `neutral` |
-
-**响应**:
-
-```json
-{ "code": 0, "msg": "ok", "data": { "emotion": "happy", "sessions": 2 } }
-```
-
-`data.emotion` is the resolved label; `data.sessions` counts the sessions that have emotion support and were updated (it can be 0 for an `avatar_id` with no live session).
-
-Errors (`code` -1): `invalid json`, `sessionid or avatar_id required`, `session not found`.
-
-Behaviour:
-- The emotion is pending until the next `/human` or `/humanaudio` upload consumes it, or `emotion_ttl_s` (default 30 s) passes.
-- An `emotion` field on `/human` or `/humanaudio` overrides the pending one for that utterance.
-- `/interrupt_talk` does not clear a pending emotion.
-- If the set is missing or not yet loaded, the utterance plays `neutral`.
-- `GET /api/admin/sessions` reports `emotion_active` and `emotion_pending` per session (`null` without emotion support).
-
----
-
-## 11. SSE 事件流
+## 10. SSE 事件流
 
 ```
 GET /sse?sessionid=<sessionid>
@@ -332,7 +297,7 @@ es.close();
 
 ---
 
-## 12. DataChannel 事件推送（字幕）
+## 11. DataChannel 事件推送（字幕）
 
 在 WebRTC 连接中通过 DataChannel 接收**服务器→客户端**的实时事件（字幕、播报状态），作为 SSE 的替代方案。
 
@@ -377,3 +342,38 @@ negotiate();   // 之后照常 POST /offer
 **生命周期**: data channel 关闭时，服务端会取消推送协程并从消息队列列表中移除，不会泄漏。多个通道互不影响。
 
 `web/index.html` 与 `web/index-en.html` 已内置该逻辑，连接成功后即可在页面「字幕 (DataChannel)」区域滚动显示字幕。
+
+---
+
+## 12. 设置表情 (/set_emotion)
+
+Choose the talking loop used for the next utterance (wav2lip avatars with `emotions` in their `custom_config.json`; see README-EN.md "Emotion talking loops").
+
+```
+POST /set_emotion
+```
+
+**Content-Type**: `application/json`
+
+| 参数 | 必填 | 类型 | 说明 |
+|------|------|------|------|
+| `sessionid` | 二选一 | string | Target one session. Wins when both are given |
+| `avatar_id` | 二选一 | string | Target every session running this avatar |
+| `emotion` | 否 | string | Name from `emotion_labels` (case-insensitive). Unknown or missing names resolve to `neutral` |
+
+**响应**:
+
+```json
+{ "code": 0, "msg": "ok", "data": { "emotion": "happy", "sessions": 2 } }
+```
+
+`data.emotion` is the resolved label; `data.sessions` counts the sessions that have emotion support and were updated (it can be 0 for an `avatar_id` with no live session).
+
+Errors (`code` -1): `invalid json`, `sessionid or avatar_id required`, `session not found`.
+
+Behaviour:
+- The emotion is pending until the next `/human` or `/humanaudio` upload consumes it, or `emotion_ttl_s` (default 30 s) passes.
+- An `emotion` field on `/human` or `/humanaudio` overrides the pending one for that utterance.
+- `/interrupt_talk` does not clear a pending emotion.
+- If the set is missing or not yet loaded, the utterance plays `neutral`.
+- `GET /api/admin/sessions` reports `emotion_active` and `emotion_pending` per session (`null` without emotion support).
