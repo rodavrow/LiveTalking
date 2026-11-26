@@ -142,6 +142,37 @@ python app.py --transport webrtc --model wav2lip --avatar_id wav2lip256_avatar1
 ### 2.6 Documentation
 <https://doc.livetalking.ai/en>
 
+### 2.7 Emotion talking loops
+
+With the wav2lip model an avatar can talk with a different frame loop per emotion. Each emotion set is a separate avatar built with `genavatar` (same `img_size`, same framing). `neutral` is always the avatar's own frames, and any emotion without a set plays `neutral`.
+
+Configure the sets in `data/avatars/<id>/custom_config.json`. The file may still be a plain list (the old form); the object form below adds `emotions`:
+
+```json
+{
+  "custom": [ { "audiotype": 1, "imgpath": "data/avatars/sylvia_3/listening", "audiopath": "" } ],
+  "emotions": {
+    "happy":     "sylvia_3_happy",
+    "sad":       "sylvia_3_sad",
+    "angry":     "sylvia_3_angry",
+    "sarcastic": "sylvia_3_sarcastic"
+  },
+  "emotion_preload": true
+}
+```
+
+`emotion_preload: true` loads all sets when the session is built; `false` loads each set on first use and plays `neutral` until it is ready. Emotions in a request `custom_config` or in `--customvideo_config` are ignored.
+
+Global settings (CLI or `config.yaml`):
+
+| Setting | Default | Meaning |
+|---------|---------|---------|
+| `emotion_enabled` | `true` | Turn the feature on or off (wav2lip only) |
+| `emotion_labels` | `neutral,happy,sad,angry,sarcastic` | Accepted emotion names; `neutral` is always added |
+| `emotion_ttl_s` | `30` | Seconds a `/set_emotion` waits for speech before it expires |
+
+Choose the emotion with `POST /set_emotion`, or with an `emotion` field on `/human` and `/humanaudio`. See `docs/api.md`.
+
 ---
 
 ## 3. Architecture
