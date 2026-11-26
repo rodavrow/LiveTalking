@@ -69,7 +69,7 @@ def load_model(path):
     model = model.to(device)
     return model.eval()
 
-def load_avatar(avatar_id):
+def load_avatar(avatar_id, max_workers: int | None = None):
     avatar_path = f"./data/avatars/{avatar_id}"
     full_imgs_path = f"{avatar_path}/full_imgs" 
     face_imgs_path = f"{avatar_path}/face_imgs" 
@@ -80,10 +80,10 @@ def load_avatar(avatar_id):
     frame_list_cycle = None
     input_img_list = glob.glob(os.path.join(full_imgs_path, '*.[jpJP][pnPN]*[gG]'))
     input_img_list = sorted(input_img_list, key=lambda x: int(os.path.splitext(os.path.basename(x))[0]))
-    frame_list_cycle = read_imgs(input_img_list)
+    frame_list_cycle = read_imgs(input_img_list, max_workers)
     input_face_list = glob.glob(os.path.join(face_imgs_path, '*.[jpJP][pnPN]*[gG]'))
     input_face_list = sorted(input_face_list, key=lambda x: int(os.path.splitext(os.path.basename(x))[0]))
-    face_list_cycle = read_imgs(input_face_list)
+    face_list_cycle = read_imgs(input_face_list, max_workers)
 
     return frame_list_cycle,face_list_cycle,coord_list_cycle
 

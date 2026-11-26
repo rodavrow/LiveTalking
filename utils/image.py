@@ -11,12 +11,12 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 #         frames.append(frame)
 #     return frames
 
-def read_imgs(img_list):
+def read_imgs(img_list, max_workers: int | None = None):
     def load_image(index, img_path):
         return index, cv2.imread(img_path)
 
     frames = [None] * len(img_list)  # Initialize a list with the same length as img_list
-    with ThreadPoolExecutor() as executor:
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = {executor.submit(load_image, idx, img_path): idx for idx, img_path in enumerate(img_list)}
         for future in tqdm(as_completed(futures), total=len(img_list)):
             idx, img = future.result()
