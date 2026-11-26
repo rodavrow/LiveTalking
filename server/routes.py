@@ -86,11 +86,13 @@ class _CancelCloser:
         self._task = None
 
     def start(self):
-        if self._task is None:
+        # Before the upgrade has finished there is nothing to close yet; wait() sends it then.
+        if self._task is None and self.ws.prepared:
             self._task = asyncio.ensure_future(self._close())
 
     async def wait(self):
-        self.start()
+        if self._task is None:
+            self._task = asyncio.ensure_future(self._close())
         await self._task
 
     async def _close(self):
@@ -144,8 +146,9 @@ async def stream_audio(request):
                 request.query.get('emotion'))
         feeder = ReplyFeeder(avatar_session.put_audio_frame, datainfo,
                              allowed=lambda: state.is_feeding(reply_id))
-        await ws.send_json({"type": "ready", "reply_id": reply_id})
-        logger.info('stream_audio reply %s open on session %s', reply_id, sessionid)
+        if not closer.requested:  # an interrupt during the upgrade gets "cancelled" instead
+            await ws.send_json({"type": "ready", "reply_id": reply_id})
+            logger.info('stream_audio reply %s open on session %s', reply_id, sessionid)
 
         while state.is_feeding(reply_id):
             try:

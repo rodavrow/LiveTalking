@@ -1,3 +1,4 @@
+import asyncio
 import json
 import unittest
 import warnings
@@ -246,6 +247,39 @@ class StreamAudioTests(AioHTTPTestCase):
         await ws.send_bytes(FRAME)
         await self.finish(ws)
         self.assertEqual(session.statuses(), ["end"])
+
+
+class FakeWs:
+    def __init__(self, prepared):
+        self.prepared = prepared
+        self.closed = False
+        self.sent = []
+
+    async def send_json(self, data):
+        self.sent.append(data)
+
+    async def close(self, code, message=b""):
+        self.closed = True
+        self.sent.append(code)
+
+
+class CancelCloserTest(unittest.IsolatedAsyncioTestCase):
+    async def test_regression_interrupt_during_upgrade_still_sends_cancelled(self):
+        ws = FakeWs(prepared=False)
+        closer = emotion_routes.routes._CancelCloser(ws)
+        closer.start()           # interrupt lands while prepare() is still running
+        await asyncio.sleep(0)   # let anything start() scheduled run before the upgrade ends
+        ws.prepared = True       # upgrade finishes
+        await closer.wait()
+        self.assertEqual(ws.sent, [{"type": "cancelled"}, 4410])
+
+    async def test_cancelled_is_sent_once_when_both_sides_close(self):
+        ws = FakeWs(prepared=True)
+        closer = emotion_routes.routes._CancelCloser(ws)
+        closer.start()
+        closer.start()
+        await closer.wait()
+        self.assertEqual(ws.sent, [{"type": "cancelled"}, 4410])
 
 
 if __name__ == "__main__":
