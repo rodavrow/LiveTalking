@@ -47,6 +47,7 @@ from fractions import Fraction
 
 from utils.logger import logger
 from utils.image import read_imgs,mirror_index
+from utils.crossfade import CrossFade
 
 # class State(Enum):
 #     INIT=0
@@ -384,11 +385,11 @@ class BaseAvatar:
         enable_transition = True  # dave: cross-fade listening <-> talking  # 设置为False禁用过渡效果，True启用
         
         _last_speaking = False
-        _transition_start = time.time()
+        crossfade = None
         if enable_transition:
-            _transition_duration = 0.25  # 过渡时间
-            _last_silent_frame = None  # 静音帧缓存
-            _last_speaking_frame = None  # 说话帧缓存
+            # 过渡时间 0.25s；每次状态切换都从切换前最后输出的帧开始淡入
+            crossfade = CrossFade(0.25, lambda a, b, alpha: cv2.addWeighted(a, 1-alpha, b, alpha, 0))
+            _last_output_frame = None
 
         self.output.start()
         
@@ -403,7 +404,8 @@ class BaseAvatar:
             current_speaking = not (audio_frames[0].type!=0 and audio_frames[1].type!=0)
             if current_speaking != _last_speaking:
                 logger.info(f"状态切换：{'说话' if _last_speaking else '静音'} → {'说话' if current_speaking else '静音'}")
-                _transition_start = time.time()
+                if crossfade is not None:
+                    crossfade.start(_last_output_frame)
             _last_speaking = current_speaking
 
             if audio_frames[0].type!=0 and audio_frames[1].type!=0: #全为静音数据，只需要取fullimg
@@ -416,17 +418,7 @@ class BaseAvatar:
                 else:
                     target_frame = self.frame_list_cycle[idx]
                 
-                if enable_transition:
-                    # 说话→静音过渡
-                    if time.time() - _transition_start < _transition_duration and _last_speaking_frame is not None:
-                        alpha = min(1.0, (time.time() - _transition_start) / _transition_duration)
-                        combine_frame = cv2.addWeighted(_last_speaking_frame, 1-alpha, target_frame, alpha, 0)
-                    else:
-                        combine_frame = target_frame
-                    # 缓存静音帧
-                    _last_silent_frame = combine_frame.copy()
-                else:
-                    combine_frame = target_frame
+                combine_frame = crossfade.apply(target_frame) if crossfade is not None else target_frame
             else:
                 self.speaking = True
                 try:
@@ -434,18 +426,11 @@ class BaseAvatar:
                 except Exception as e:
                     logger.warning(f"paste_back_frame error: {e}")
                     continue
-                if enable_transition:
-                    # 静音→说话过渡
-                    if time.time() - _transition_start < _transition_duration and _last_silent_frame is not None:
-                        alpha = min(1.0, (time.time() - _transition_start) / _transition_duration)
-                        combine_frame = cv2.addWeighted(_last_silent_frame, 1-alpha, current_frame, alpha, 0)
-                    else:
-                        combine_frame = current_frame
-                    # 缓存说话帧
-                    _last_speaking_frame = combine_frame.copy()
-                else:
-                    combine_frame = current_frame
+                combine_frame = crossfade.apply(current_frame) if crossfade is not None else current_frame
 
+            if crossfade is not None:
+                # 在 putText 水印之前缓存，作为下一次状态切换的淡入源
+                _last_output_frame = combine_frame.copy()
             cv2.putText(combine_frame, "LiveTalking", (10, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.3, (128,128,128), 1)
             
             # 使用统一输出接口推送视频帧
