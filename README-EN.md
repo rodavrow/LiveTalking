@@ -150,18 +150,20 @@ Configure the sets in `data/avatars/<id>/custom_config.json`. The file may still
 
 ```json
 {
-  "custom": [ { "audiotype": 1, "imgpath": "data/avatars/sylvia_3/listening", "audiopath": "" } ],
+  "custom": [ { "audiotype": 1, "imgpath": "data/avatars/wav2lip256_avatar1/listening", "audiopath": "" } ],
   "emotions": {
-    "happy":     "sylvia_3_happy",
-    "sad":       "sylvia_3_sad",
-    "angry":     "sylvia_3_angry",
-    "sarcastic": "sylvia_3_sarcastic"
+    "happy":     "wav2lip256_avatar1_happy",
+    "sad":       "wav2lip256_avatar1_sad",
+    "angry":     "wav2lip256_avatar1_angry",
+    "sarcastic": "wav2lip256_avatar1_sarcastic"
   },
   "emotion_preload": true
 }
 ```
 
 `emotion_preload: true` loads all sets when the session is built; `false` loads each set on first use and plays `neutral` until it is ready. Emotions in a request `custom_config` or in `--customvideo_config` are ignored.
+
+Emotions are read from `data/avatars/<id>/custom_config.json` for every session, so a malformed file makes session creation fail even when the request sends its own `custom_config`.
 
 Global settings (CLI or `config.yaml`):
 

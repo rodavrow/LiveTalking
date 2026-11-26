@@ -332,6 +332,7 @@ negotiate();   // 之后照常 POST /offer
 
 > 每个句子会推送 `start` / `end` 两条消息，展示字幕时只取 `start` 可以避免重复。
 > 消息中也可能携带 TTS 透传的 `tts` 字段；若后续接入语音识别，用户侧文本会带 `from: "user"`。
+> 上传（`/human`、`/humanaudio`）产生的 `start` / `end` 事件还会携带 `emotion` 字段（见 `/set_emotion`）。
 
 **客户端→服务器消息**:
 
