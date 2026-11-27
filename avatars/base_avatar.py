@@ -463,8 +463,9 @@ class BaseAvatar:
         crossfade = None
         _last_output_frame = None
         if enable_transition:
-            # 过渡时间 0.25s；每次状态切换都从切换前最后输出的帧开始淡入
-            crossfade = CrossFade(0.25, lambda a, b, alpha: cv2.addWeighted(a, 1-alpha, b, alpha, 0))
+            # 过渡 6 帧（25 fps 下 0.25s）；每次状态切换都从切换前最后输出的帧开始淡入
+            # Counted in frames: a batch is rendered in a burst, far ahead of playback.
+            crossfade = CrossFade(6, lambda a, b, alpha: cv2.addWeighted(a, 1-alpha, b, alpha, 0))
 
         self.output.start()
         
